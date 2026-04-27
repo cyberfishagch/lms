@@ -36,6 +36,12 @@ class CourseLesson(Document):
 		via a path that bypasses the parent Course Chapter save will not have a
 		corresponding Lesson Reference, causing the lesson to be invisible to the
 		progress denominator and producing wrong percentages.
+
+		Note: we deliberately insert the child doc directly via frappe.get_doc
+		rather than `parent.append(...)` + `parent.save()`. Re-saving the parent
+		would re-trigger Course Chapter.on_update (this method's twin) on the
+		Chapter, which is fine in isolation but would also fire update_lesson_count
+		and a downstream LMS Course on_update — extra work for no reason here.
 		"""
 		if not self.chapter:
 			return
