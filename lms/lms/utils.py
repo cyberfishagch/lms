@@ -317,7 +317,8 @@ def get_course_progress(course: str, member: str = None):
 		{"course": course, "member": member or frappe.session.user, "status": "Complete"},
 	)
 	precision = cint(frappe.db.get_default("float_precision")) or 3
-	return flt(((completed_lessons / lesson_count) * 100), precision)
+	# Clamp at 100 to defend against duplicate/orphan Course Progress rows inflating the count.
+	return min(100, flt(((completed_lessons / lesson_count) * 100), precision))
 
 
 def is_instructor(course: str) -> bool:

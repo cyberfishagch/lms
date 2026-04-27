@@ -23,6 +23,66 @@ class CourseLesson(Document):
 
 	def on_update(self):
 		self.validate_quiz_id()
+		self.sync_lesson_reference()
+
+	def on_trash(self):
+		frappe.db.delete("Lesson Reference", {"lesson": self.name})
+
+	def sync_lesson_reference(self):
+		"""Ensure a Lesson Reference row exists in the chapter's child table.
+
+		Required because get_lessons / get_course_outline count Lesson Reference
+		rows under Chapter Reference rows. A Course Lesson created (or reparented)
+		via a path that bypasses the parent Course Chapter save will not have a
+		corresponding Lesson Reference, causing the lesson to be invisible to the
+		progress denominator and producing wrong percentages.
+		"""
+		if not self.chapter:
+			return
+
+		before = self.get_doc_before_save()
+		if before and before.chapter and before.chapter != self.chapter:
+			frappe.db.delete(
+				"Lesson Reference",
+				{
+					"parent": before.chapter,
+					"parenttype": "Course Chapter",
+					"parentfield": "lessons",
+					"lesson": self.name,
+				},
+			)
+
+		existing = frappe.db.exists(
+			"Lesson Reference",
+			{
+				"parent": self.chapter,
+				"parenttype": "Course Chapter",
+				"parentfield": "lessons",
+				"lesson": self.name,
+			},
+		)
+		if existing:
+			return
+
+		max_idx = (
+			frappe.db.sql(
+				"""SELECT COALESCE(MAX(idx), 0) FROM `tabLesson Reference`
+				WHERE parent = %s AND parenttype = 'Course Chapter' AND parentfield = 'lessons'""",
+				self.chapter,
+			)[0][0]
+			or 0
+		)
+
+		frappe.get_doc(
+			{
+				"doctype": "Lesson Reference",
+				"parent": self.chapter,
+				"parenttype": "Course Chapter",
+				"parentfield": "lessons",
+				"lesson": self.name,
+				"idx": max_idx + 1,
+			}
+		).insert(ignore_permissions=True)
 
 	def validate_progress_recalculation(self):
 		if not self.course or not self.chapter:
