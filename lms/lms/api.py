@@ -2304,3 +2304,78 @@ def reset_user_course_progress(course: str, member: str) -> dict:
 	)
 
 	return {"status": "ok", "deleted": deleted}
+
+
+@frappe.whitelist()
+def delete_course_progress_for_preview(course: str):
+	"""Wipe the calling user's progress for a course (preview-mode cleanup).
+
+	Frontend "Preview as Learner" lets admins consume a course end-to-end,
+	then optionally discard the resulting enrollment + progress. This RPC is
+	the only path the frontend should use for that cleanup so the destructive
+	deletion is gated by role server-side, not just by a URL flag.
+
+	Always scopes to `frappe.session.user`. There is no `member` argument —
+	a compromised admin token still cannot wipe another learner's data.
+	"""
+	frappe.only_for(["Moderator", "Course Creator", "Batch Evaluator"])
+
+	if not course:
+		frappe.throw(_("course is required"))
+
+	user = frappe.session.user
+
+	# Use frappe.delete_doc rather than frappe.db.delete so child tables
+	# cascade (LMS Quiz Submission has a `result` child of LMS Quiz Result).
+	try:
+		quiz_submissions = frappe.get_all(
+			"LMS Quiz Submission",
+			filters={"course": course, "member": user},
+			pluck="name",
+		)
+		for name in quiz_submissions:
+			frappe.delete_doc("LMS Quiz Submission", name, ignore_permissions=True)
+
+		progress_records = frappe.get_all(
+			"LMS Course Progress",
+			filters={"course": course, "member": user},
+			pluck="name",
+		)
+		for name in progress_records:
+			frappe.delete_doc("LMS Course Progress", name, ignore_permissions=True)
+
+		certificates = frappe.get_all(
+			"LMS Certificate",
+			filters={"course": course, "member": user},
+			pluck="name",
+		)
+		for name in certificates:
+			frappe.delete_doc("LMS Certificate", name, ignore_permissions=True)
+
+		enrollments = frappe.get_all(
+			"LMS Enrollment",
+			filters={"course": course, "member": user},
+			pluck="name",
+		)
+		for name in enrollments:
+			frappe.delete_doc("LMS Enrollment", name, ignore_permissions=True)
+
+		frappe.db.commit()
+
+		frappe.logger().info(
+			f"Preview cleanup: user={user} course={course} "
+			f"submissions={len(quiz_submissions)} "
+			f"progress={len(progress_records)} "
+			f"certificates={len(certificates)} "
+			f"enrollments={len(enrollments)}"
+		)
+
+		return {
+			"quiz_submissions": len(quiz_submissions),
+			"progress_records": len(progress_records),
+			"certificates": len(certificates),
+			"enrollments": len(enrollments),
+		}
+	except Exception:
+		frappe.db.rollback()
+		raise
