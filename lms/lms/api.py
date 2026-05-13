@@ -2222,3 +2222,85 @@ def get_badges(member: str):
 	)
 
 	return badges
+
+
+@frappe.whitelist()
+def reset_user_course_progress(course: str, member: str) -> dict:
+	"""Reset a single user's progress on a single course.
+
+	Intended for admin / testing flows where a learner needs to retake a
+	course from scratch. Deletes every per-(course, member) progress and
+	workflow row, then zeroes the cached aggregate on the enrollment doc.
+	The enrollment itself stays — only its child data is wiped.
+
+	Runs all deletions within the request's Frappe transaction (Frappe
+	doesn't auto-commit between statements, so an exception mid-cascade
+	leaves the DB untouched). Child rows are deleted before the parent
+	enrollment is updated so there's no window where the enrollment shows
+	0% while its child rows still claim completion.
+
+	Keeps: the LMS Enrollment doc itself, LMS Lesson Note rows (user's
+	personal writing — not progress data).
+
+	Deletes:
+		- LMS Course Progress
+		- LMS Quiz Submission
+		- LMS Assignment Submission
+		- LMS Certificate
+		- LMS Certificate Request
+		- LMS Certificate Evaluation
+
+	Args:
+		course: The course doc name.
+		member: The user (email) whose progress should be reset.
+
+	Returns:
+		dict with the count of rows deleted per doctype (useful for the UI
+		to show a meaningful confirmation toast).
+	"""
+	if not can_modify_course(course):
+		frappe.throw(
+			_("You do not have permission to reset enrollment progress for this course."),
+			frappe.PermissionError,
+		)
+
+	if not frappe.db.exists("LMS Enrollment", {"course": course, "member": member}):
+		frappe.throw(
+			_("No enrollment found for this user on this course."),
+			frappe.DoesNotExistError,
+		)
+
+	# Order matters: delete deepest workflow rows first, then progress rows,
+	# then update the enrollment aggregate. An exception part-way through
+	# rolls back the whole request — no orphan child rows next to a still-
+	# 100% enrollment.
+	filters = {"course": course, "member": member}
+	doctypes_to_clear = [
+		"LMS Quiz Submission",
+		"LMS Assignment Submission",
+		"LMS Certificate Evaluation",
+		"LMS Certificate Request",
+		"LMS Certificate",
+		"LMS Course Progress",
+	]
+
+	deleted = {}
+	for doctype in doctypes_to_clear:
+		# Count first so the response is informative. frappe.db.delete returns
+		# nothing useful, and the count lets the UI say "cleared N quiz
+		# attempts, M lesson completions" instead of a vague "done".
+		count = frappe.db.count(doctype, filters)
+		if count:
+			frappe.db.delete(doctype, filters)
+		deleted[doctype] = count
+
+	# Reset the cached enrollment aggregate. set_value writes through the
+	# normal Frappe layer (triggers any on_update hooks on LMS Enrollment).
+	enrollment_name = frappe.db.get_value("LMS Enrollment", filters, "name")
+	frappe.db.set_value(
+		"LMS Enrollment",
+		enrollment_name,
+		{"progress": 0, "current_lesson": None},
+	)
+
+	return {"status": "ok", "deleted": deleted}
