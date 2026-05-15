@@ -234,4 +234,13 @@ def get_permission_query_conditions(user):
 	roles = frappe.get_roles(user)
 	if "Moderator" in roles or "Course Creator" in roles or "Batch Evaluator" in roles:
 		return None
-	return """(`tabLMS Certificate`.published = 1)"""
+	# Learners must see their OWN certificates in their /certificates list
+	# regardless of the `published` flag — `published` gates the public
+	# verification view, not self-view. Pre-fix this only returned
+	# `published = 1`, which silently hid every fresh cert from its owner.
+	escaped = frappe.db.escape(user)
+	return (
+		f"(`tabLMS Certificate`.published = 1 "
+		f"OR `tabLMS Certificate`.owner = {escaped} "
+		f"OR `tabLMS Certificate`.member = {escaped})"
+	)
