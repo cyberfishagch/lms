@@ -147,7 +147,18 @@ scheduler_events = {
 	],
 }
 
-fixtures = ["Custom Field", "Function", "Industry", "LMS Category"]
+fixtures = [
+	"Custom Field",
+	"Function",
+	"Industry",
+	"LMS Category",
+	# Ship the Certificate print format (matchbox-branded template, inlined
+	# SVG logo, no external fonts) as a fixture so a fresh bench / a prod
+	# deploy gets it via `bench migrate` rather than relying on a manual
+	# Print Format edit on the running site. Scoped by name to avoid
+	# accidentally exporting unrelated print formats.
+	{"dt": "Print Format", "filters": [["name", "in", ["Certificate"]]]},
+]
 
 # Testing
 # -------
