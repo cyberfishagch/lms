@@ -2546,11 +2546,21 @@ def clone_course(source_name: str, also_duplicate_quizzes: int = 0) -> dict:
 			"chapter",
 		}
 
+		# Use a single short hash for this clone run so chapter/lesson names
+		# are unique even when the source's chapter/lesson titles already
+		# exist elsewhere in the DB. Course Chapter and Course Lesson both
+		# use Frappe's `format:{####} {title}` autoname, which can re-issue
+		# a counter that collides with an existing doc — observed on courses
+		# whose chapters share titles with prior clones. Bypassing autoname
+		# with an explicit `name` field skips that whole class of failure.
+		clone_tag = frappe.generate_hash(length=8)
+
 		for sc in source_chapters:
 			source_chapter = frappe.get_doc("Course Chapter", sc.name)
 			new_chapter_data = {
 				"doctype": "Course Chapter",
 				"course": new_course.name,
+				"name": f"clone-{clone_tag}-ch{chapter_count + 1:04d} {source_chapter.title}"[:140],
 			}
 			for fieldname, value in source_chapter.as_dict().items():
 				if fieldname in skip_chapter_fields or fieldname in new_chapter_data:
@@ -2574,6 +2584,7 @@ def clone_course(source_name: str, also_duplicate_quizzes: int = 0) -> dict:
 					"doctype": "Course Lesson",
 					"course": new_course.name,
 					"chapter": new_chapter.name,
+					"name": f"clone-{clone_tag}-le{lesson_count + 1:04d} {source_lesson.title}"[:140],
 				}
 				for fieldname, value in source_lesson.as_dict().items():
 					if fieldname in skip_lesson_fields or fieldname in new_lesson_data:
