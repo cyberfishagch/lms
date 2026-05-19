@@ -2294,6 +2294,46 @@ def reset_user_course_progress(course: str, member: str) -> dict:
 			frappe.db.delete(doctype, filters)
 		deleted[doctype] = count
 
+	# Belt-and-suspenders pass for LMS Quiz Submission. The doctype has a
+	# `course` column, but it isn't reliably populated — submissions made
+	# via the standalone /quizzes/<id> entry point (no course context) save
+	# with course=NULL, and those rows still gate `quizPassed` on the
+	# learner's lesson page. Resolve the course's quiz ids via Course Lesson
+	# links and sweep ONLY those untagged submissions.
+	#
+	# Scope is intentionally narrow: rows where `course` is NULL or empty.
+	# Quizzes are reusable across courses by design — the same `LMS Quiz`
+	# can back lessons in multiple courses — so we must not delete a
+	# submission tagged with a different `course` just because it happens
+	# to be in this course's lesson list.
+	#
+	# Limitation: only resolves quizzes linked via `Course Lesson.quiz_id`.
+	# Quizzes embedded in lesson markdown via `{{ Quiz(...) }}` macros are
+	# not included; if a learner attempts one of those outside the course
+	# context the submission may survive this reset. Acceptable until we
+	# see a real case — admin can re-run reset after identifying it.
+	course_quiz_ids = frappe.db.sql_list(
+		"""SELECT DISTINCT quiz_id FROM `tabCourse Lesson`
+		   WHERE course = %s AND quiz_id IS NOT NULL AND quiz_id != ''""",
+		course,
+	)
+	if course_quiz_ids:
+		untagged_rows = frappe.db.sql(
+			"""SELECT name FROM `tabLMS Quiz Submission`
+			   WHERE member = %(member)s
+			     AND quiz IN %(quizzes)s
+			     AND (course IS NULL OR course = '')""",
+			{"member": member, "quizzes": tuple(course_quiz_ids)},
+		)
+		untagged_names = [row[0] for row in untagged_rows]
+		if untagged_names:
+			frappe.db.delete("LMS Quiz Submission", {"name": ["in", untagged_names]})
+			# Use .get() so future refactors that drop LMS Quiz Submission
+			# from the first loop don't turn this into a KeyError.
+			deleted["LMS Quiz Submission"] = (
+				deleted.get("LMS Quiz Submission", 0) + len(untagged_names)
+			)
+
 	# Reset the cached enrollment aggregate. set_value writes through the
 	# normal Frappe layer (triggers any on_update hooks on LMS Enrollment).
 	enrollment_name = frappe.db.get_value("LMS Enrollment", filters, "name")
