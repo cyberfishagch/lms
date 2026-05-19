@@ -2568,6 +2568,10 @@ def clone_course(source_name: str, also_duplicate_quizzes: int = 0) -> dict:
 				new_chapter_data[fieldname] = value
 
 			new_chapter = frappe.get_doc(new_chapter_data)
+			# Frappe's `format:{####} {title}` autoname overrides any explicit
+			# `name` we set unless flags.name_set is True. Without this flag
+			# our collision-avoidance name gets thrown away at insert time.
+			new_chapter.flags.name_set = True
 			new_chapter.insert(ignore_permissions=True)
 			chapter_count += 1
 
@@ -2598,6 +2602,10 @@ def clone_course(source_name: str, also_duplicate_quizzes: int = 0) -> dict:
 					new_lesson_data["quiz_id"] = quiz_map[quiz_id]
 
 				new_lesson = frappe.get_doc(new_lesson_data)
+				# Same flag-flip as Course Chapter — Course Lesson also uses
+				# `format:{####} {title}` autoname which would replace our
+				# explicit collision-safe name.
+				new_lesson.flags.name_set = True
 				new_lesson.insert(ignore_permissions=True)
 				lesson_count += 1
 
