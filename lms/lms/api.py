@@ -2769,3 +2769,216 @@ def clone_course(source_name: str) -> dict:
 	except Exception:
 		frappe.db.rollback()
 		raise
+
+
+def _quiz_names_from_content(content_json_str: str | None) -> set[str]:
+	"""Collect quiz refs from BOTH 'quiz' blocks (data.quiz) and 'upload'
+	video blocks (data.quizzes[]).
+
+	Frappe LMS' get_quiz_progress (course_lesson.py:218) walks the same
+	two block shapes when computing completion, so a clone that ignored
+	'upload' block quiz refs would leave the cloned lesson pointing at
+	the source's quizzes from inside its video timeline.
+	"""
+	if not content_json_str:
+		return set()
+
+	try:
+		content = json.loads(content_json_str)
+	except (TypeError, ValueError):
+		return set()
+
+	quiz_names: set[str] = set()
+	for block in content.get("blocks", []) if isinstance(content, dict) else []:
+		if not isinstance(block, dict):
+			continue
+		data = block.get("data")
+		if not isinstance(data, dict):
+			continue
+		if block.get("type") == "quiz":
+			if data.get("quiz"):
+				quiz_names.add(data["quiz"])
+		elif block.get("type") == "upload":
+			for row in data.get("quizzes") or []:
+				if isinstance(row, dict) and row.get("quiz"):
+					quiz_names.add(row["quiz"])
+
+	return quiz_names
+
+
+def _rewrite_quiz_blocks(
+	content_json_str: str | None, mapping: dict[str, str]
+) -> str | None:
+	"""Rewrite quiz refs in both 'quiz' blocks AND 'upload' video blocks.
+
+	Mirror of _quiz_names_from_content's traversal so every reference
+	the clone collected also gets retargeted to the new quiz id.
+	"""
+	if not content_json_str:
+		return content_json_str
+
+	try:
+		content = json.loads(content_json_str)
+	except (TypeError, ValueError):
+		return content_json_str
+
+	if not isinstance(content, dict) or not isinstance(content.get("blocks"), list):
+		return content_json_str
+
+	changed = False
+	for block in content.get("blocks", []):
+		if not isinstance(block, dict):
+			continue
+		data = block.get("data")
+		if not isinstance(data, dict):
+			continue
+		if block.get("type") == "quiz":
+			old_quiz = data.get("quiz")
+			if old_quiz in mapping:
+				data["quiz"] = mapping[old_quiz]
+				changed = True
+		elif block.get("type") == "upload":
+			for row in data.get("quizzes") or []:
+				if not isinstance(row, dict):
+					continue
+				old_quiz = row.get("quiz")
+				if old_quiz in mapping:
+					row["quiz"] = mapping[old_quiz]
+					changed = True
+
+	return json.dumps(content) if changed else content_json_str
+
+
+def _clone_lms_quiz(source_quiz_name: str) -> str:
+	source_quiz = frappe.get_doc("LMS Quiz", source_quiz_name)
+	source_quiz_dict = source_quiz.as_dict()
+	skip_quiz_fields = _CLONE_META_FIELDS | {
+		"course",
+		"lesson",
+		"questions",
+	}
+
+	new_quiz_data = {"doctype": "LMS Quiz"}
+	for fieldname, value in source_quiz_dict.items():
+		if fieldname in skip_quiz_fields or fieldname in new_quiz_data:
+			continue
+		new_quiz_data[fieldname] = value
+
+	new_quiz_data["questions"] = []
+	for question in source_quiz.questions or []:
+		new_question = {}
+		for fieldname, value in question.as_dict().items():
+			if fieldname in _CLONE_META_FIELDS or fieldname == "doctype":
+				continue
+			new_question[fieldname] = value
+		new_quiz_data["questions"].append(new_question)
+
+	# LMS Quiz.title has a UNIQUE constraint at the DB level. Keep the
+	# admin-visible title close to the source (no "(copy)" — explicit
+	# product decision) but append a short generated suffix so the
+	# unique index is satisfied. Pre-check the title via frappe.db.exists
+	# instead of relying on UniqueValidationError + rollback — a rollback
+	# inside this helper would also unwind quizzes cloned earlier in the
+	# same `clone_lesson_into_chapter` call.
+	base_title = source_quiz_dict.get("title") or "Quiz"
+	for _ in range(8):
+		candidate_title = f"{base_title} ({frappe.generate_hash(length=4)})"
+		if not frappe.db.exists("LMS Quiz", {"title": candidate_title}):
+			new_quiz_data["title"] = candidate_title
+			new_quiz = frappe.get_doc(new_quiz_data)
+			new_quiz.insert(ignore_permissions=True)
+			return new_quiz.name
+	frappe.throw(_("Failed to find a unique title for the cloned quiz."))
+
+
+@frappe.whitelist()
+def clone_lesson_into_chapter(source_lesson: str, target_chapter: str) -> dict:
+	"""Clone a Course Lesson into another chapter.
+
+	Creates a new independent lesson under the target chapter and duplicates
+	every referenced `LMS Quiz` so edits to the source lesson or quizzes do not
+	propagate into the clone.
+
+	Args:
+		source_lesson: doc name of the Course Lesson to clone.
+		target_chapter: doc name of the target Course Chapter.
+
+	Returns:
+		dict with the new lesson name, quiz-name rewrite map, and lesson title.
+
+	Raises:
+		frappe.PermissionError: caller lacks `can_modify_course` on target course.
+		frappe.DoesNotExistError: source lesson or target chapter not found.
+	"""
+	target_course = frappe.db.get_value("Course Chapter", target_chapter, "course")
+	if not target_course:
+		frappe.throw(_("Target chapter not found."), frappe.DoesNotExistError)
+
+	if not can_modify_course(target_course):
+		frappe.throw(
+			_("You do not have permission to clone lessons into this course."),
+			frappe.PermissionError,
+		)
+
+	if not frappe.db.exists("Course Lesson", source_lesson):
+		frappe.throw(_("Source lesson not found."), frappe.DoesNotExistError)
+
+	source = frappe.get_doc("Course Lesson", source_lesson)
+
+	try:
+		quiz_names = set()
+		if source.quiz_id:
+			quiz_names.add(source.quiz_id)
+		quiz_names.update(_quiz_names_from_content(source.content))
+		quiz_names.update(_quiz_names_from_content(source.instructor_content))
+
+		quiz_mapping = {}
+		for quiz_name in quiz_names:
+			quiz_mapping[quiz_name] = _clone_lms_quiz(quiz_name)
+
+		skip_lesson_fields = _CLONE_META_FIELDS | {
+			"chapter",
+			"course",
+		}
+
+		new_lesson_data = {
+			"doctype": "Course Lesson",
+			"chapter": target_chapter,
+		}
+		for fieldname, value in source.as_dict().items():
+			if fieldname in skip_lesson_fields or fieldname in new_lesson_data:
+				continue
+			new_lesson_data[fieldname] = value
+
+		if source.quiz_id:
+			new_lesson_data["quiz_id"] = quiz_mapping.get(source.quiz_id, source.quiz_id)
+		new_lesson_data["content"] = _rewrite_quiz_blocks(source.content, quiz_mapping)
+		new_lesson_data["instructor_content"] = _rewrite_quiz_blocks(
+			source.instructor_content, quiz_mapping
+		)
+
+		new_lesson = frappe.get_doc(new_lesson_data)
+		new_lesson.insert(ignore_permissions=True)
+
+		# Stamp back-pointers on EVERY cloned quiz explicitly, regardless of
+		# whether it was referenced via quiz_id, content blocks, or
+		# instructor_content. Frappe LMS' CourseLesson.save_lesson_details_in_quiz
+		# hook has a bug (course_lesson.py:121 — accepts a `content` param but
+		# ignores it and re-parses self.content), so instructor_content quizzes
+		# would never get their back-pointers stamped via the hook path. Doing
+		# it here makes the back-pointer state correct for every clone.
+		for new_quiz_name in quiz_mapping.values():
+			frappe.db.set_value(
+				"LMS Quiz",
+				new_quiz_name,
+				{"course": target_course, "lesson": new_lesson.name},
+			)
+
+		return {
+			"lesson": new_lesson.name,
+			"quizzes": quiz_mapping,
+			"title": new_lesson.title,
+		}
+	except Exception:
+		frappe.db.rollback()
+		raise
