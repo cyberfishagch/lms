@@ -478,89 +478,239 @@ def delete_lesson(lesson: str, chapter: str):
 	frappe.delete_doc("Course Lesson", lesson)
 
 
-@frappe.whitelist()
-def update_lesson_index(lesson: str, sourceChapter: str, targetChapter: str, idx: int):
-	course = frappe.db.get_value("Course Chapter", sourceChapter, "course")
-	if not can_modify_course(course):
-		frappe.throw(_("You do not have permission to modify this lesson."), frappe.PermissionError)
+def _upsert_chapter_reference(course: str, chapter: str, new_idx: int) -> None:
+	"""Idempotently set the Chapter Reference idx for (course, chapter).
 
-	hasMoved = sourceChapter == targetChapter
-	update_source_chapter(lesson, sourceChapter, idx, hasMoved)
-	if not hasMoved:
-		update_target_chapter(lesson, targetChapter, idx)
+	Used by update_chapter_index to renumber from the Course Chapter list
+	(authoritative). If a reference row already exists it's updated;
+	otherwise it's inserted with the requested idx. This sidesteps the
+	"sparse-idx backfill collision" failure mode where len(existing) lands
+	on an already-occupied idx.
+	"""
+	ref_name = frappe.db.exists(
+		"Chapter Reference",
+		{
+			"parent": course,
+			"parenttype": "LMS Course",
+			"parentfield": "chapters",
+			"chapter": chapter,
+		},
+	)
+	if ref_name:
+		frappe.db.set_value("Chapter Reference", ref_name, "idx", new_idx)
+		return
+	frappe.get_doc(
+		{
+			"doctype": "Chapter Reference",
+			"parent": course,
+			"parenttype": "LMS Course",
+			"parentfield": "chapters",
+			"chapter": chapter,
+			"idx": new_idx,
+		}
+	).insert(ignore_permissions=True)
 
 
-def update_source_chapter(lesson: str, chapter: str, idx: int, hasMoved: bool = False):
-	lessons = frappe.get_all(
+def _upsert_lesson_reference(chapter: str, lesson: str, new_idx: int) -> None:
+	"""Same shape as _upsert_chapter_reference, for Lesson Reference."""
+	ref_name = frappe.db.exists(
 		"Lesson Reference",
 		{
-			"parent": chapter,
-		},
-		pluck="lesson",
-		order_by="idx",
-	)
-
-	lessons.remove(lesson)
-	if not hasMoved:
-		frappe.db.delete("Lesson Reference", {"parent": chapter, "lesson": lesson})
-	else:
-		lessons.insert(idx, lesson)
-
-	update_index(lessons, chapter)
-
-
-def update_target_chapter(lesson: str, chapter: str, idx: int):
-	lessons = frappe.get_all(
-		"Lesson Reference",
-		{
-			"parent": chapter,
-		},
-		pluck="lesson",
-		order_by="idx",
-	)
-
-	lessons.insert(idx, lesson)
-	new_lesson_reference = frappe.new_doc("Lesson Reference")
-	new_lesson_reference.update(
-		{
-			"lesson": lesson,
 			"parent": chapter,
 			"parenttype": "Course Chapter",
 			"parentfield": "lessons",
-		}
+			"lesson": lesson,
+		},
 	)
-	new_lesson_reference.insert()
-	update_index(lessons, chapter)
+	if ref_name:
+		frappe.db.set_value("Lesson Reference", ref_name, "idx", new_idx)
+		return
+	frappe.get_doc(
+		{
+			"doctype": "Lesson Reference",
+			"parent": chapter,
+			"parenttype": "Course Chapter",
+			"parentfield": "lessons",
+			"lesson": lesson,
+			"idx": new_idx,
+		}
+	).insert(ignore_permissions=True)
+
+
+@frappe.whitelist()
+def update_lesson_index(lesson: str, sourceChapter: str, targetChapter: str, idx: int):
+	"""Reorder a lesson within sourceChapter, or move it to targetChapter at idx.
+
+	idx is the 0-based target position within the destination chapter's
+	lesson list.
+	"""
+	source_course = frappe.db.get_value("Course Chapter", sourceChapter, "course")
+	if not can_modify_course(source_course):
+		frappe.throw(_("You do not have permission to modify this lesson."), frappe.PermissionError)
+
+	# Cross-chapter move: target chapter MUST belong to the same course.
+	# We deliberately do not support cross-course lesson moves through
+	# this endpoint because `Course Lesson.course` is a fetched field
+	# from `chapter.course` (course_lesson.json:77) — frappe.db.set_value
+	# on `chapter` doesn't refresh `course`, which would desync the
+	# lesson from its actual course. The admin UI also doesn't expose
+	# this operation. If a real cross-course move is ever needed, build
+	# a separate endpoint that goes through frappe.get_doc + save() to
+	# trigger the fetch refresh.
+	if sourceChapter != targetChapter:
+		target_course = frappe.db.get_value("Course Chapter", targetChapter, "course")
+		if not target_course:
+			frappe.throw(_("Target chapter not found."), frappe.DoesNotExistError)
+		if target_course != source_course:
+			frappe.throw(
+				_("Cross-course lesson moves are not supported through this endpoint."),
+				frappe.ValidationError,
+			)
+
+	hasMoved = sourceChapter == targetChapter
+	if hasMoved:
+		_reorder_lessons_in_chapter(sourceChapter, lesson, idx)
+	else:
+		_move_lesson_to_chapter(lesson, sourceChapter, targetChapter, idx)
+
+
+def _reorder_lessons_in_chapter(chapter: str, lesson: str, idx: int) -> None:
+	"""Reorder a lesson within its current chapter.
+
+	Builds the authoritative order from Course Lesson docs (always present),
+	applies the move, and renumbers both Lesson Reference and Course Lesson.idx.
+	"""
+	lesson_names = frappe.get_all(
+		"Course Lesson",
+		filters={"chapter": chapter},
+		pluck="name",
+		order_by="idx asc, creation asc",
+	)
+	if lesson not in lesson_names:
+		return
+	lesson_names.remove(lesson)
+	lesson_names.insert(idx, lesson)
+	_renumber_lessons(chapter, lesson_names)
+
+
+def _move_lesson_to_chapter(lesson: str, sourceChapter: str, targetChapter: str, idx: int) -> None:
+	# Detach from source: delete its Lesson Reference, repoint the Course
+	# Lesson, renumber the surviving source siblings.
+	frappe.db.delete("Lesson Reference", {"parent": sourceChapter, "lesson": lesson})
+	frappe.db.set_value("Course Lesson", lesson, "chapter", targetChapter)
+
+	source_remaining = frappe.get_all(
+		"Course Lesson",
+		filters={"chapter": sourceChapter},
+		pluck="name",
+		order_by="idx asc, creation asc",
+	)
+	_renumber_lessons(sourceChapter, source_remaining)
+
+	# Attach to target at the requested position and renumber.
+	target_names = frappe.get_all(
+		"Course Lesson",
+		filters={"chapter": targetChapter},
+		pluck="name",
+		order_by="idx asc, creation asc",
+	)
+	# `lesson` was just repointed via set_value above, so it should appear
+	# in the target list — but order_by idx leaves it where it lands.
+	# Pull it out and re-insert at the requested position.
+	if lesson in target_names:
+		target_names.remove(lesson)
+	target_names.insert(idx, lesson)
+	_renumber_lessons(targetChapter, target_names)
+
+
+def _renumber_lessons(chapter: str, lesson_names: list) -> None:
+	"""Renumber both Lesson Reference and Course Lesson.idx for a chapter.
+
+	The Lesson Reference table is the learner-side canonical sort key
+	(read by get_course_outline); Course Lesson.idx is what the admin
+	edit page orders by via useFrappeGetDocList. Keeping both in sync is
+	required for the admin reorder UI to reflect changes.
+	"""
+	for i, lesson_name in enumerate(lesson_names):
+		new_idx = i + 1
+		_upsert_lesson_reference(chapter, lesson_name, new_idx)
+		frappe.db.set_value("Course Lesson", lesson_name, "idx", new_idx)
+
+
+# Kept for backwards compatibility with any external caller that still
+# imports the previous helpers. They now route through the new normalized
+# reorder path so behavior is identical for the in-app reorder flow.
+def update_source_chapter(lesson: str, chapter: str, idx: int, hasMoved: bool = False):
+	if hasMoved:
+		_reorder_lessons_in_chapter(chapter, lesson, idx)
+		return
+	frappe.db.delete("Lesson Reference", {"parent": chapter, "lesson": lesson})
+	remaining = frappe.get_all(
+		"Course Lesson",
+		filters={"chapter": chapter},
+		pluck="name",
+		order_by="idx asc, creation asc",
+	)
+	_renumber_lessons(chapter, remaining)
+
+
+def update_target_chapter(lesson: str, chapter: str, idx: int):
+	frappe.db.set_value("Course Lesson", lesson, "chapter", chapter)
+	target_names = frappe.get_all(
+		"Course Lesson",
+		filters={"chapter": chapter},
+		pluck="name",
+		order_by="idx asc, creation asc",
+	)
+	if lesson in target_names:
+		target_names.remove(lesson)
+	target_names.insert(idx, lesson)
+	_renumber_lessons(chapter, target_names)
 
 
 def update_index(lessons: list, chapter: str):
-	for row in lessons:
-		frappe.db.set_value(
-			"Lesson Reference", {"lesson": row, "parent": chapter}, "idx", lessons.index(row) + 1
-		)
+	"""Deprecated shim — kept in case anything outside lms/api.py calls it."""
+	_renumber_lessons(chapter, lessons)
 
 
 @frappe.whitelist()
 def update_chapter_index(chapter: str, course: str, idx: int):
-	"""Update the index of a chapter within a course"""
+	"""Update the index of a chapter within a course.
+
+	idx is the 0-based target position in the chapter list. The list of
+	chapters is built from Course Chapter docs (the always-present source
+	of truth); reordering writes both Chapter Reference.idx (learner-side
+	sort key) and Course Chapter.idx (admin-side sort key).
+	"""
 
 	if not can_modify_course(course):
 		frappe.throw(_("You do not have permission to modify this chapter."), frappe.PermissionError)
 
-	chapters = frappe.get_all(
-		"Chapter Reference",
-		{"parent": course},
-		pluck="chapter",
-		order_by="idx",
+	# Build authoritative order from Course Chapter, NOT from
+	# Chapter Reference — the latter can be missing/sparse on older
+	# courses where the on_update sync hook never fired. Using
+	# Course Chapter as source of truth also matches what the admin UI
+	# currently displays, so the user's "swapIdx" target position is
+	# computed in the same frame of reference.
+	chapter_names = frappe.get_all(
+		"Course Chapter",
+		filters={"course": course},
+		pluck="name",
+		order_by="idx asc, creation asc",
 	)
+	if chapter not in chapter_names:
+		return
 
-	if chapter in chapters:
-		chapters.remove(chapter)
+	chapter_names.remove(chapter)
+	chapter_names.insert(idx, chapter)
 
-	chapters.insert(idx, chapter)
-
-	for i, chapter_name in enumerate(chapters):
-		frappe.db.set_value("Chapter Reference", {"chapter": chapter_name, "parent": course}, "idx", i + 1)
+	for i, chapter_name in enumerate(chapter_names):
+		new_idx = i + 1
+		# Course Chapter.idx — admin-side sort key
+		frappe.db.set_value("Course Chapter", chapter_name, "idx", new_idx)
+		# Chapter Reference — learner-side sort key (upsert handles
+		# courses that don't yet have any Chapter References)
+		_upsert_chapter_reference(course, chapter_name, new_idx)
 
 
 @frappe.whitelist()
