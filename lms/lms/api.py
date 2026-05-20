@@ -2982,3 +2982,93 @@ def clone_lesson_into_chapter(source_lesson: str, target_chapter: str) -> dict:
 	except Exception:
 		frappe.db.rollback()
 		raise
+
+
+@frappe.whitelist()
+def clone_chapter_into_course(source_chapter: str, target_course: str) -> dict:
+	"""Clone a Course Chapter (including all its lessons) into another course.
+
+	Lesson quiz references propagate as-is (quizzes are reusable — same model
+	as clone_lesson_into_chapter after the reuse change).
+
+	Args:
+		source_chapter: doc name of the Course Chapter to clone.
+		target_course: doc name of the LMS Course to clone into.
+
+	Returns:
+		{"chapter": new_chapter_name, "title": title, "lesson_count": int}
+
+	Raises:
+		frappe.PermissionError: caller lacks `can_modify_course` on target_course.
+		frappe.DoesNotExistError: source chapter or target course not found.
+	"""
+	if not frappe.db.exists("LMS Course", target_course):
+		frappe.throw(_("Target course not found."), frappe.DoesNotExistError)
+
+	if not can_modify_course(target_course):
+		frappe.throw(
+			_("You do not have permission to clone chapters into this course."),
+			frappe.PermissionError,
+		)
+
+	if not frappe.db.exists("Course Chapter", source_chapter):
+		frappe.throw(_("Source chapter not found."), frappe.DoesNotExistError)
+
+	source = frappe.get_doc("Course Chapter", source_chapter)
+
+	try:
+		skip_chapter_fields = _CLONE_META_FIELDS | {
+			"course",
+			"idx",
+			"lessons",
+			"course_title",
+		}
+		new_chapter_data = {
+			"doctype": "Course Chapter",
+			"course": target_course,
+		}
+		for fieldname, value in source.as_dict().items():
+			if fieldname in skip_chapter_fields or fieldname in new_chapter_data:
+				continue
+			new_chapter_data[fieldname] = value
+
+		new_chapter = frappe.get_doc(new_chapter_data)
+		new_chapter.insert(ignore_permissions=True)
+
+		skip_lesson_fields = _CLONE_META_FIELDS | {
+			"chapter",
+			"course",
+		}
+		lesson_count = 0
+		source_lessons = frappe.get_all(
+			"Course Lesson",
+			filters={"chapter": source_chapter},
+			fields=["name"],
+			order_by="idx asc",
+		)
+
+		for sl in source_lessons:
+			source_lesson = frappe.get_doc("Course Lesson", sl.name)
+			new_lesson_data = {
+				"doctype": "Course Lesson",
+				"chapter": new_chapter.name,
+				"course": target_course,
+				"idx": lesson_count + 1,
+			}
+			for fieldname, value in source_lesson.as_dict().items():
+				if fieldname in skip_lesson_fields or fieldname in new_lesson_data:
+					continue
+				new_lesson_data[fieldname] = value
+
+			new_lesson = frappe.get_doc(new_lesson_data)
+			new_lesson.insert(ignore_permissions=True)
+			lesson_count += 1
+
+		return {
+			"chapter": new_chapter.name,
+			"title": new_chapter.title,
+			"lesson_count": lesson_count,
+		}
+	except Exception:
+		frappe.db.rollback()
+		raise

@@ -1,7 +1,9 @@
+import json
+
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from lms.lms.api import clone_course, reset_user_course_progress
+from lms.lms.api import clone_chapter_into_course, clone_course, reset_user_course_progress
 
 
 class TestCourseCloneAndProgressRegressions(FrappeTestCase):
@@ -120,6 +122,103 @@ class TestCourseCloneAndProgressRegressions(FrappeTestCase):
 		self.assertEqual(enrollment.progress, 0)
 		self.assertIsNone(enrollment.current_lesson)
 
+	def test_clone_chapter_into_course_brings_lessons_and_reuses_quizzes(self):
+		source = self._create_course(
+			title=f"Chapter Clone Source {frappe.generate_hash(length=8)}",
+			instructor="Administrator",
+		)
+		target = self._create_course(
+			title=f"Chapter Clone Target {frappe.generate_hash(length=8)}",
+			instructor="Administrator",
+		)
+		chapter = self._insert_chapter(source.name, "Reusable Chapter")
+		quiz = self._create_quiz_without_questions()
+		quiz_content = json.dumps(
+			{"blocks": [{"type": "quiz", "data": {"quiz": quiz.name}}]}
+		)
+		lesson_1 = self._insert_lesson(source.name, chapter.name, "Quiz ID Lesson", quiz.name)
+		lesson_2 = self._insert_lesson(
+			source.name,
+			chapter.name,
+			"Content Quiz Lesson",
+			content=quiz_content,
+		)
+		self._insert_lesson(source.name, chapter.name, "Plain Lesson")
+
+		quiz_count_before = frappe.db.count("LMS Quiz")
+		result = clone_chapter_into_course(chapter.name, target.name)
+		self.cleanup_items.append(("Course Chapter", result["chapter"]))
+
+		new_chapter = frappe.get_doc("Course Chapter", result["chapter"])
+		self.assertEqual(new_chapter.course, target.name)
+		self.assertEqual(
+			result,
+			{"chapter": new_chapter.name, "title": new_chapter.title, "lesson_count": 3},
+		)
+
+		new_lessons = frappe.get_all(
+			"Course Lesson",
+			filters={"chapter": new_chapter.name},
+			fields=["name", "title", "idx", "quiz_id", "content"],
+			order_by="idx asc",
+		)
+		for lesson in new_lessons:
+			self.cleanup_items.append(("Course Lesson", lesson.name))
+
+		self.assertEqual(len(new_lessons), 3)
+		self.assertEqual([lesson.idx for lesson in new_lessons], [1, 2, 3])
+		self.assertEqual(
+			[lesson.title for lesson in new_lessons],
+			["Quiz ID Lesson", "Content Quiz Lesson", "Plain Lesson"],
+		)
+		self.assertEqual(new_lessons[0].quiz_id, lesson_1.quiz_id)
+		self.assertEqual(new_lessons[1].content, lesson_2.content)
+		self.assertEqual(frappe.db.count("LMS Quiz"), quiz_count_before)
+
+	def test_clone_chapter_into_course_handles_empty_chapter(self):
+		source = self._create_course(
+			title=f"Empty Chapter Clone Source {frappe.generate_hash(length=8)}",
+			instructor="Administrator",
+		)
+		target = self._create_course(
+			title=f"Empty Chapter Clone Target {frappe.generate_hash(length=8)}",
+			instructor="Administrator",
+		)
+		chapter = self._insert_chapter(source.name, "Empty Reusable Chapter")
+
+		result = clone_chapter_into_course(chapter.name, target.name)
+		self.cleanup_items.append(("Course Chapter", result["chapter"]))
+
+		new_chapter = frappe.get_doc("Course Chapter", result["chapter"])
+		self.assertEqual(
+			result,
+			{"chapter": new_chapter.name, "title": new_chapter.title, "lesson_count": 0},
+		)
+		self.assertEqual(new_chapter.course, target.name)
+		self.assertEqual(frappe.db.count("Course Lesson", {"chapter": new_chapter.name}), 0)
+		self.assertEqual(len(new_chapter.lessons or []), 0)
+
+	def test_clone_chapter_into_course_rejects_unauthorized(self):
+		source = self._create_course(
+			title=f"Unauthorized Chapter Clone Source {frappe.generate_hash(length=8)}",
+			instructor="Administrator",
+		)
+		target = self._create_course(
+			title=f"Unauthorized Chapter Clone Target {frappe.generate_hash(length=8)}",
+			instructor="Administrator",
+		)
+		chapter = self._insert_chapter(source.name, "Unauthorized Chapter")
+		member = self._create_user(
+			f"chapter-clone-denied-{frappe.generate_hash(length=8)}@example.com",
+			"Chapter",
+			"Denied",
+			["LMS Student"],
+		)
+
+		frappe.set_user(member.name)
+		with self.assertRaises(frappe.PermissionError):
+			clone_chapter_into_course(chapter.name, target.name)
+
 	def _create_quiz_without_questions(self):
 		quiz = frappe.get_doc(
 			{
@@ -202,15 +301,19 @@ class TestCourseCloneAndProgressRegressions(FrappeTestCase):
 		self.cleanup_items.append(("Course Chapter", chapter.name))
 		return chapter
 
-	def _insert_lesson(self, course, chapter, title, quiz_id):
+	def _insert_lesson(
+		self, course, chapter, title, quiz_id=None, content='{"blocks":[]}'
+	):
+		idx = frappe.db.count("Course Lesson", {"chapter": chapter}) + 1
 		lesson = frappe.get_doc(
 			{
 				"doctype": "Course Lesson",
 				"course": course,
 				"chapter": chapter,
+				"idx": idx,
 				"title": title,
 				"quiz_id": quiz_id,
-				"content": '{"blocks":[]}',
+				"content": content,
 			}
 		)
 		lesson.insert(ignore_permissions=True)
