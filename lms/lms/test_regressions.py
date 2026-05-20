@@ -1,7 +1,12 @@
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from lms.lms.api import clone_course, reset_user_course_progress
+from lms.lms.api import (
+	clone_course,
+	clone_lesson_into_chapter,
+	clone_quiz,
+	reset_user_course_progress,
+)
 
 
 class TestCourseCloneAndProgressRegressions(FrappeTestCase):
@@ -69,6 +74,76 @@ class TestCourseCloneAndProgressRegressions(FrappeTestCase):
 
 		self.assertEqual(frappe.db.count("LMS Quiz"), quiz_count_before)
 
+	def test_clone_lesson_into_chapter_reuses_quizzes(self):
+		source_course = self._create_course(
+			title=f"Lesson Clone Source {frappe.generate_hash(length=8)}",
+			instructor="Administrator",
+		)
+		target_course = self._create_course(
+			title=f"Lesson Clone Target {frappe.generate_hash(length=8)}",
+			instructor="Administrator",
+		)
+		source_chapter = self._insert_chapter(source_course.name, "Source Chapter")
+		target_chapter = self._insert_chapter(target_course.name, "Target Chapter")
+		quiz = self._create_quiz_without_questions()
+		content = f'{{"blocks":[{{"type":"quiz","data":{{"quiz":"{quiz.name}"}}}}]}}'
+		instructor_content = (
+			f'{{"blocks":[{{"type":"upload","data":{{"quizzes":[{{"quiz":"{quiz.name}"}}]}}}}]}}'
+		)
+		source_lesson = self._insert_lesson(
+			source_course.name,
+			source_chapter.name,
+			"Reusable Quiz Lesson",
+			quiz.name,
+			content=content,
+			instructor_content=instructor_content,
+		)
+		quiz_count_before = frappe.db.count("LMS Quiz")
+
+		result = clone_lesson_into_chapter(source_lesson.name, target_chapter.name)
+		self.cleanup_items.append(("Course Lesson", result["lesson"]))
+		new_lesson = frappe.get_doc("Course Lesson", result["lesson"])
+
+		self.assertNotIn("quizzes", result)
+		self.assertEqual(result["title"], source_lesson.title)
+		self.assertEqual(new_lesson.quiz_id, quiz.name)
+		self.assertEqual(new_lesson.content, content)
+		self.assertEqual(new_lesson.instructor_content, instructor_content)
+		self.assertEqual(frappe.db.count("LMS Quiz"), quiz_count_before)
+
+	def test_clone_quiz_deep_copies_questions_and_handles_title_collision(self):
+		source_quiz = self._create_quiz_with_questions()
+
+		first_result = clone_quiz(source_quiz.name)
+		first_clone = frappe.get_doc("LMS Quiz", first_result["name"])
+		self._track_quiz_with_questions(first_clone.name)
+
+		self.assertNotEqual(first_clone.name, source_quiz.name)
+		self.assertNotEqual(first_clone.title, source_quiz.title)
+		self.assertEqual(first_clone.title, f"{source_quiz.title} (copy)")
+		self.assertEqual(len(first_clone.questions), 2)
+
+		source_question_names = [row.question for row in source_quiz.questions]
+		cloned_question_names = [row.question for row in first_clone.questions]
+		self.assertEqual(len(set(cloned_question_names)), 2)
+		for question_name in cloned_question_names:
+			self.assertNotIn(question_name, source_question_names)
+			self.assertTrue(frappe.db.exists("LMS Question", question_name))
+
+		cloned_question = frappe.get_doc("LMS Question", cloned_question_names[0])
+		cloned_question.question = "Edited cloned question?"
+		cloned_question.save(ignore_permissions=True)
+		source_question = frappe.get_doc("LMS Question", source_question_names[0])
+		self.assertNotEqual(source_question.question, cloned_question.question)
+
+		second_result = clone_quiz(source_quiz.name)
+		second_clone = frappe.get_doc("LMS Quiz", second_result["name"])
+		self._track_quiz_with_questions(second_clone.name)
+
+		self.assertNotEqual(second_clone.name, source_quiz.name)
+		self.assertNotEqual(second_clone.title, first_clone.title)
+		self.assertTrue(second_clone.title.startswith(f"{source_quiz.title} (copy "))
+
 	def test_reset_user_course_progress_sweeps_only_course_and_untagged_reusable_quiz_submissions(self):
 		member = self._create_user(
 			f"reset-regression-{frappe.generate_hash(length=8)}@example.com",
@@ -127,6 +202,39 @@ class TestCourseCloneAndProgressRegressions(FrappeTestCase):
 				"title": f"Reusable Quiz {frappe.generate_hash(length=8)}",
 				"passing_percentage": 70,
 				"total_marks": 10,
+			}
+		)
+		quiz.insert(ignore_permissions=True)
+		self.cleanup_items.append(("LMS Quiz", quiz.name))
+		return quiz
+
+	def _create_question(self, index):
+		question = frappe.get_doc(
+			{
+				"doctype": "LMS Question",
+				"question": f"Regression question {index}?",
+				"type": "Choices",
+				"option_1": "Correct",
+				"is_correct_1": 1,
+				"option_2": "Incorrect",
+				"is_correct_2": 0,
+			}
+		)
+		question.insert(ignore_permissions=True)
+		self.cleanup_items.append(("LMS Question", question.name))
+		return question
+
+	def _create_quiz_with_questions(self):
+		questions = [self._create_question(1), self._create_question(2)]
+		quiz = frappe.get_doc(
+			{
+				"doctype": "LMS Quiz",
+				"title": f"Deep Copy Quiz {frappe.generate_hash(length=8)}",
+				"passing_percentage": 70,
+				"questions": [
+					{"question": questions[0].name, "marks": 3},
+					{"question": questions[1].name, "marks": 4},
+				],
 			}
 		)
 		quiz.insert(ignore_permissions=True)
@@ -202,7 +310,15 @@ class TestCourseCloneAndProgressRegressions(FrappeTestCase):
 		self.cleanup_items.append(("Course Chapter", chapter.name))
 		return chapter
 
-	def _insert_lesson(self, course, chapter, title, quiz_id):
+	def _insert_lesson(
+		self,
+		course,
+		chapter,
+		title,
+		quiz_id,
+		content='{"blocks":[]}',
+		instructor_content=None,
+	):
 		lesson = frappe.get_doc(
 			{
 				"doctype": "Course Lesson",
@@ -210,7 +326,8 @@ class TestCourseCloneAndProgressRegressions(FrappeTestCase):
 				"chapter": chapter,
 				"title": title,
 				"quiz_id": quiz_id,
-				"content": '{"blocks":[]}',
+				"content": content,
+				"instructor_content": instructor_content,
 			}
 		)
 		lesson.insert(ignore_permissions=True)
@@ -241,3 +358,8 @@ class TestCourseCloneAndProgressRegressions(FrappeTestCase):
 			self.cleanup_items.append(("Course Chapter", chapter))
 		for lesson in frappe.get_all("Course Lesson", {"course": course}, pluck="name"):
 			self.cleanup_items.append(("Course Lesson", lesson))
+
+	def _track_quiz_with_questions(self, quiz):
+		for question in frappe.get_all("LMS Quiz Question", {"parent": quiz}, pluck="question"):
+			self.cleanup_items.append(("LMS Question", question))
+		self.cleanup_items.append(("LMS Quiz", quiz))
