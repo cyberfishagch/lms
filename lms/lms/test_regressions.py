@@ -10,6 +10,7 @@ from lms.lms.api import (
 	clone_quiz,
 	reset_user_course_progress,
 )
+from lms.lms.doctype.lms_quiz.lms_quiz import quiz_summary
 
 
 class TestCourseCloneAndProgressRegressions(FrappeTestCase):
@@ -289,6 +290,60 @@ class TestCourseCloneAndProgressRegressions(FrappeTestCase):
 		fresh_suffix = int(fresh.name[len(prefix):])
 		# The new question must come AFTER every previously-existing row.
 		self.assertGreater(fresh_suffix, max_existing)
+
+	def test_quiz_summary_stamps_course_on_submission_for_cross_course_scoping(self):
+		# Reproduces the cross-course skip regression: prior to this fix,
+		# create_submission saved every LMS Quiz Submission with course=NULL.
+		# The same LMS Quiz is reused across courses (lms#14), so a pass in
+		# course A made LessonPage's quizPassed gate true in course B and
+		# learners could skip the quiz-after-video gate. Now quiz_summary
+		# accepts course and stamps it on the row.
+		import json
+
+		course = self._create_course(
+			title=f"Quiz Attribution Course {frappe.generate_hash(length=8)}",
+			instructor="Administrator",
+		)
+		other_course = self._create_course(
+			title=f"Quiz Attribution Other {frappe.generate_hash(length=8)}",
+			instructor="Administrator",
+		)
+		quiz = self._create_quiz_with_questions()
+		# Use a high passing_percentage so save_progress_after_quiz neither
+		# triggers the >= branch (we won't score that high with fake answers)
+		# nor the "no passing threshold" elif branch — both call save_progress
+		# which requires lesson + course on the quiz doc, and we don't link
+		# either since the assertion is on the submission row, not progress.
+		quiz.passing_percentage = 100
+		quiz.save(ignore_permissions=True)
+
+		# Build a non-empty result payload that quiz_summary can process.
+		# We only care that a submission row gets written with course set —
+		# the scoring outcome isn't under test.
+		results = [
+			{
+				"question_name": row.question,
+				"is_correct": [1],
+				"answer": "",
+			}
+			for row in quiz.questions
+		]
+
+		response_a = quiz_summary(quiz=quiz.name, results=json.dumps(results), course=course.name)
+		self.cleanup_items.append(("LMS Quiz Submission", response_a["submission"]))
+		response_b = quiz_summary(quiz=quiz.name, results=json.dumps(results), course=other_course.name)
+		self.cleanup_items.append(("LMS Quiz Submission", response_b["submission"]))
+		response_untagged = quiz_summary(quiz=quiz.name, results=json.dumps(results))
+		self.cleanup_items.append(("LMS Quiz Submission", response_untagged["submission"]))
+
+		sub_a = frappe.get_doc("LMS Quiz Submission", response_a["submission"])
+		sub_b = frappe.get_doc("LMS Quiz Submission", response_b["submission"])
+		sub_untagged = frappe.get_doc("LMS Quiz Submission", response_untagged["submission"])
+
+		self.assertEqual(sub_a.course, course.name)
+		self.assertEqual(sub_b.course, other_course.name)
+		# Back-compat: legacy callers without `course` keep submitting untagged.
+		self.assertFalse(sub_untagged.course)
 
 	def test_reset_user_course_progress_sweeps_only_course_and_untagged_reusable_quiz_submissions(self):
 		member = self._create_user(
