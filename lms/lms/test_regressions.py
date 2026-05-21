@@ -147,6 +147,69 @@ class TestCourseCloneAndProgressRegressions(FrappeTestCase):
 		self.assertNotEqual(second_clone.title, first_clone.title)
 		self.assertTrue(second_clone.title.startswith(f"{source_quiz.title} (copy "))
 
+	def test_clone_quiz_recovers_when_lms_question_series_counter_has_drifted(self):
+		# Reproduces the production error "LMS Question QTS-2026-00109 already
+		# exists". `format:QTS-{YYYY}-{#####}` autoname uses Frappe's global
+		# Series('') counter (see frappe/tests/test_naming.py:103), which can
+		# drift below the real max existing name when records get inserted by
+		# fixtures, migrations, or sibling format-autoname doctypes. The next
+		# autoname-driven insert in clone_quiz then collides.
+		from frappe.utils import now_datetime
+
+		source_quiz = self._create_quiz_with_questions()
+		year = now_datetime().strftime("%Y")
+		prefix = f"QTS-{year}-"
+
+		# Find the lowest existing LMS Question suffix for this prefix and
+		# wind the series counter back to just before it — the next autoname
+		# will then land on an already-taken name.
+		rows = frappe.db.sql(
+			"""SELECT MIN(CAST(SUBSTRING(name, %s) AS UNSIGNED))
+			   FROM `tabLMS Question` WHERE name LIKE %s""",
+			(len(prefix) + 1, prefix + "%"),
+		)
+		min_existing = (rows[0][0] if rows and rows[0] else None) or 1
+		target_current = max(0, min_existing - 1)
+
+		# tabSeries has no `modified` column, so we use raw SQL — frappe.db
+		# helpers add ORDER BY modified / SET modified automatically.
+		original_current = frappe.db.get_value("Series", "", "current", order_by="name")
+		series_existed = original_current is not None
+		if series_existed:
+			frappe.db.sql(
+				"UPDATE `tabSeries` SET `current` = %s WHERE `name` = ''",
+				(target_current,),
+			)
+		else:
+			frappe.db.sql(
+				"INSERT INTO `tabSeries` (`name`, `current`) VALUES ('', %s)",
+				(target_current,),
+			)
+		frappe.db.commit()
+
+		try:
+			result = clone_quiz(source_quiz.name)
+		finally:
+			# Restore series state so the rest of the suite isn't affected.
+			if series_existed:
+				frappe.db.sql(
+					"UPDATE `tabSeries` SET `current` = %s WHERE `name` = ''",
+					(original_current,),
+				)
+			else:
+				frappe.db.sql("DELETE FROM `tabSeries` WHERE `name` = ''")
+			frappe.db.commit()
+
+		cloned_quiz = frappe.get_doc("LMS Quiz", result["name"])
+		self._track_quiz_with_questions(cloned_quiz.name)
+
+		self.assertEqual(len(cloned_quiz.questions), 2)
+		cloned_question_names = [row.question for row in cloned_quiz.questions]
+		self.assertEqual(len(set(cloned_question_names)), 2)
+		for qname in cloned_question_names:
+			self.assertTrue(qname.startswith(prefix))
+			self.assertTrue(frappe.db.exists("LMS Question", qname))
+
 	def test_reset_user_course_progress_sweeps_only_course_and_untagged_reusable_quiz_submissions(self):
 		member = self._create_user(
 			f"reset-regression-{frappe.generate_hash(length=8)}@example.com",
