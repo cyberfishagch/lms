@@ -101,7 +101,13 @@ def set_total_marks(questions: list) -> int:
 
 
 @frappe.whitelist()
-def quiz_summary(quiz: str, results: str):
+def quiz_summary(quiz: str, results: str, course: str | None = None):
+	# `course` carries the lesson-context of where the quiz was attempted.
+	# Without it, submissions land with course=NULL and the LessonPage's
+	# quizPassed gate accepts those as "pass" for ANY course that uses the
+	# same quiz — i.e. the cross-course skip regression. The learner client
+	# sends this; older callers that don't are tolerated (back-compat) and
+	# their submissions remain untagged.
 	results = results and json.loads(results)
 	percentage = 0
 
@@ -127,7 +133,9 @@ def quiz_summary(quiz: str, results: str):
 
 	score_out_of = quiz_details.total_marks
 	percentage = (score / score_out_of) * 100 if score_out_of else 0
-	submission = create_submission(quiz, results, score_out_of, quiz_details.passing_percentage)
+	submission = create_submission(
+		quiz, results, score_out_of, quiz_details.passing_percentage, course=course
+	)
 
 	save_progress_after_quiz(quiz_details, percentage)
 
@@ -231,9 +239,15 @@ def get_corrupted_image_msg():
 	return _("Image: Corrupted Data Stream")
 
 
-def create_submission(quiz: str, results: list, score_out_of: int, passing_percentage: float):
+def create_submission(
+	quiz: str,
+	results: list,
+	score_out_of: int,
+	passing_percentage: float,
+	course: str | None = None,
+):
 	submission = frappe.new_doc("LMS Quiz Submission")
-	# Score and percentage are calculated by the controller function
+	# Score and percentage are calculated by the controller function.
 	submission.update(
 		{
 			"doctype": "LMS Quiz Submission",
@@ -247,6 +261,19 @@ def create_submission(quiz: str, results: list, score_out_of: int, passing_perce
 		}
 	)
 	submission.save(ignore_permissions=True)
+
+	# Stamp the course AFTER save, on purpose. The `course` field on
+	# LMS Quiz Submission has fetch_from="quiz.course" + read_only=1, so
+	# anything we put on the doc before save gets overwritten by the fetch
+	# (and quizzes are reusable across courses since lms#14, so quiz.course
+	# is usually empty). Bypass with frappe.db.set_value — the value is the
+	# lesson-context course, not the quiz's own course link. Required by the
+	# LessonPage quizPassed gate to avoid cross-course pass leakage.
+	if course and frappe.db.exists("LMS Course", course):
+		frappe.db.set_value(
+			"LMS Quiz Submission", submission.name, "course", course, update_modified=False
+		)
+		submission.reload()
 	return submission
 
 
