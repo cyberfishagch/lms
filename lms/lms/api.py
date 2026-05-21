@@ -2779,6 +2779,37 @@ def _copy_clone_fields(source_dict: dict, skip_fields: set[str]) -> dict:
 	}
 
 
+def _insert_with_naming_retry(doc, *, max_retries: int = 200):
+	"""Insert a doc whose autoname uses a Series counter, retrying when the
+	generated name collides with an existing record.
+
+	Frappe's ``format:`` autoname (e.g. ``format:QTS-{YYYY}-{#####}`` on LMS
+	Question) shares the global ``Series('')`` counter across every doctype
+	that uses a ``{#####}`` placeholder — see frappe/tests/test_naming.py:103.
+	That counter drifts below the real max name suffix whenever records get
+	inserted by fixtures, migrations, manual SQL, or sibling doctypes that
+	share the series. The next autoname-driven insert then throws
+	DuplicateEntryError on what should have been a fresh name.
+
+	Each retry calls insert() → autoname → getseries() which advances the
+	counter by 1, so we eventually walk past the gap. Bounded by max_retries
+	to avoid burning the entire 5-digit range if something else is wrong.
+	"""
+	last_err = None
+	for _ in range(max_retries):
+		try:
+			doc.insert(ignore_permissions=True)
+			return doc
+		except frappe.DuplicateEntryError as err:
+			last_err = err
+			# Frappe set_new_name() resets doc.name to None before the next
+			# autoname run, but be explicit so a future change in core
+			# doesn't silently break this loop.
+			doc.name = None
+			continue
+	raise last_err
+
+
 def _get_unique_quiz_copy_title(base_title: str | None) -> str:
 	base_title = base_title or "Quiz"
 	candidate_title = f"{base_title} (copy)"
@@ -2825,7 +2856,7 @@ def clone_quiz(source_quiz: str) -> dict:
 				**_copy_clone_fields(source_question.as_dict(), _CLONE_META_FIELDS),
 			}
 			new_question = frappe.get_doc(new_question_data)
-			new_question.insert(ignore_permissions=True)
+			_insert_with_naming_retry(new_question)
 			question_mapping[row.question] = new_question.name
 
 		skip_quiz_fields = _CLONE_META_FIELDS | {
