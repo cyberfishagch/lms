@@ -210,6 +210,86 @@ class TestCourseCloneAndProgressRegressions(FrappeTestCase):
 			self.assertTrue(qname.startswith(prefix))
 			self.assertTrue(frappe.db.exists("LMS Question", qname))
 
+	def test_lms_question_insert_recovers_when_global_series_counter_drifted(self):
+		# Reproduces the wizard-side failure: Step 3 of the course wizard calls
+		# createDoc('LMS Question') directly (no clone_quiz wrapper), so the
+		# retry helper in api.py never fires. The format:QTS-{YYYY}-{#####}
+		# autoname uses Frappe's *global* Series('') counter, which drifts
+		# below the real max existing name whenever fixtures or sibling
+		# format-autoname doctypes increment it. LMSQuestion.before_insert
+		# walks the counter forward so every insert path (wizard, admin UI,
+		# fixtures) is safe — not just clone_quiz.
+		from frappe.utils import now_datetime
+
+		year = now_datetime().strftime("%Y")
+		prefix = f"QTS-{year}-"
+
+		# Make sure at least one QTS-{year}-* row exists so there's a max to
+		# sync TO. Otherwise the first ever insert in a fresh DB has nothing
+		# to recover from and the test is vacuous.
+		anchor = frappe.get_doc({
+			"doctype": "LMS Question",
+			"question": f"Anchor {frappe.generate_hash(length=6)}",
+			"type": "Choices",
+			"option_1": "A",
+			"option_2": "B",
+			"is_correct_1": 1,
+		})
+		anchor.insert(ignore_permissions=True)
+		self.cleanup_items.append(("LMS Question", anchor.name))
+
+		rows = frappe.db.sql(
+			"""SELECT MAX(CAST(SUBSTRING(name, %s) AS UNSIGNED))
+			   FROM `tabLMS Question` WHERE name LIKE %s""",
+			(len(prefix) + 1, prefix + "%"),
+		)
+		max_existing = (rows[0][0] if rows and rows[0] else None) or 0
+
+		# Desync: push Series('') back so the next autoname would land on an
+		# already-used name. Raw SQL — tabSeries has no `modified` column.
+		original = frappe.db.get_value("Series", "", "current", order_by="name")
+		series_existed = original is not None
+		target = max(0, max_existing - 3)
+		if series_existed:
+			frappe.db.sql(
+				"UPDATE `tabSeries` SET `current` = %s WHERE `name` = ''",
+				(target,),
+			)
+		else:
+			frappe.db.sql(
+				"INSERT INTO `tabSeries` (`name`, `current`) VALUES ('', %s)",
+				(target,),
+			)
+		frappe.db.commit()
+
+		try:
+			# This insert hits before_insert which re-syncs Series('') to
+			# max_existing, so autoname produces max_existing+1 cleanly.
+			fresh = frappe.get_doc({
+				"doctype": "LMS Question",
+				"question": f"Fresh {frappe.generate_hash(length=6)}",
+				"type": "Choices",
+				"option_1": "A",
+				"option_2": "B",
+				"is_correct_1": 1,
+			})
+			fresh.insert(ignore_permissions=True)
+			self.cleanup_items.append(("LMS Question", fresh.name))
+		finally:
+			if series_existed:
+				frappe.db.sql(
+					"UPDATE `tabSeries` SET `current` = %s WHERE `name` = ''",
+					(original,),
+				)
+			else:
+				frappe.db.sql("DELETE FROM `tabSeries` WHERE `name` = ''")
+			frappe.db.commit()
+
+		self.assertTrue(fresh.name.startswith(prefix))
+		fresh_suffix = int(fresh.name[len(prefix):])
+		# The new question must come AFTER every previously-existing row.
+		self.assertGreater(fresh_suffix, max_existing)
+
 	def test_reset_user_course_progress_sweeps_only_course_and_untagged_reusable_quiz_submissions(self):
 		member = self._create_user(
 			f"reset-regression-{frappe.generate_hash(length=8)}@example.com",
