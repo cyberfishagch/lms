@@ -74,6 +74,7 @@ before_uninstall = "lms.install.before_uninstall"
 setup_wizard_requires = "assets/lms/js/setup_wizard.js"
 after_migrate = [
 	"lms.sqlite.build_index_in_background",
+	"lms.install.after_migrate",
 ]
 
 # Desk Notifications

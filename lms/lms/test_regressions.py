@@ -10,6 +10,11 @@ from lms.lms.api import (
 	clone_quiz,
 	reset_user_course_progress,
 )
+from lms.install import (
+	LMS_DESK_ACCESS_REPROMOTE_CAP,
+	LMS_LEARNER_ROLES,
+	enforce_lms_roles_desk_access,
+)
 from lms.lms.doctype.lms_quiz.lms_quiz import quiz_summary
 
 
@@ -344,6 +349,105 @@ class TestCourseCloneAndProgressRegressions(FrappeTestCase):
 		self.assertEqual(sub_b.course, other_course.name)
 		# Back-compat: legacy callers without `course` keep submitting untagged.
 		self.assertFalse(sub_untagged.course)
+
+	def test_enforce_lms_roles_desk_access_resets_drift_and_repromotes_affected_users(self):
+		# Reproduces the prod drift: `LMS Student.desk_access` ended up at 1
+		# despite install.py + a migration patch both setting it to 0.
+		# Frappe core's User.set_system_user() then auto-flipped every user
+		# with that role to user_type=System User, and the admin enrollment
+		# combobox silently excluded them.
+		#
+		# The new after_migrate hook (`enforce_lms_roles_desk_access`) must:
+		#  1. Reset desk_access=0 on every LMS role that drifted to 1.
+		#  2. Re-save users with the affected role so set_system_user()
+		#     re-evaluates them back to Website User.
+		# Idempotent — no-op when nothing's drifted.
+
+		# Set up a user with LMS Student role; baseline must be Website User.
+		email = f"desk-drift-{frappe.generate_hash(length=8)}@example.com"
+		user = self._create_user(email, "Drift", "Test", ["LMS Student"])
+		self.assertEqual(frappe.db.get_value("User", email, "user_type"), "Website User")
+
+		# Force the drift: set desk_access=1 on LMS Student, save the user
+		# to trigger Frappe's auto-flip to System User. (We don't re-save
+		# the role through the doc API — that would cascade and re-evaluate
+		# all users with it; we need to simulate the *quiet* drift that
+		# left users desync'd from the role's flag.)
+		frappe.db.set_value("Role", "LMS Student", "desk_access", 1)
+		user_doc = frappe.get_doc("User", email)
+		user_doc.save(ignore_permissions=True)
+		self.assertEqual(frappe.db.get_value("User", email, "user_type"), "System User")
+
+		# Run the hook — should detect drift, reset, re-save affected users.
+		try:
+			enforce_lms_roles_desk_access()
+		finally:
+			# Guarantee teardown leaves the role correct even if the
+			# assertion below fails.
+			frappe.db.set_value("Role", "LMS Student", "desk_access", 0)
+
+		# Role reset.
+		self.assertEqual(frappe.db.get_value("Role", "LMS Student", "desk_access"), 0)
+		# User re-saved → user_type back to Website User.
+		self.assertEqual(frappe.db.get_value("User", email, "user_type"), "Website User")
+
+	def test_enforce_lms_roles_desk_access_caps_user_resave_loop(self):
+		# When too many users would need re-save, the hook MUST still reset
+		# the role flag (structural fix) but skip the per-user save loop
+		# (bounded runtime). The cap prevents `bench migrate` from stalling
+		# for minutes on a large drifted deployment. Monkeypatch the cap
+		# down to 1 so we can exercise the path with a single affected user.
+		from unittest.mock import patch as mock_patch
+
+		email = f"desk-drift-cap-{frappe.generate_hash(length=8)}@example.com"
+		self._create_user(email, "Cap", "Test", ["LMS Student"])
+
+		# Force drift state matching the prod observation.
+		frappe.db.set_value("Role", "LMS Student", "desk_access", 1)
+		user_doc = frappe.get_doc("User", email)
+		user_doc.save(ignore_permissions=True)
+		self.assertEqual(frappe.db.get_value("User", email, "user_type"), "System User")
+
+		try:
+			with mock_patch("lms.install.LMS_DESK_ACCESS_REPROMOTE_CAP", 0):
+				enforce_lms_roles_desk_access()
+		finally:
+			frappe.db.set_value("Role", "LMS Student", "desk_access", 0)
+
+		# Role reset MUST still happen (structural fix is independent of the cap).
+		self.assertEqual(frappe.db.get_value("Role", "LMS Student", "desk_access"), 0)
+		# User_type stays System User — re-save loop was skipped by the cap.
+		# Operator is responsible for running the hook manually after deploy.
+		self.assertEqual(frappe.db.get_value("User", email, "user_type"), "System User")
+
+		# Sanity: the cap default is sane (not 0 or undefined).
+		self.assertGreater(LMS_DESK_ACCESS_REPROMOTE_CAP, 0)
+
+	def test_enforce_lms_roles_desk_access_is_noop_when_nothing_drifted(self):
+		# Idempotency check: every LMS_LEARNER_ROLES role at desk_access=0
+		# means the hook makes zero writes. Snapshot the role modified
+		# timestamps; they must not change.
+		baseline = {
+			role: frappe.db.get_value("Role", role, ["desk_access", "modified"], as_dict=True)
+			for role in LMS_LEARNER_ROLES
+			if frappe.db.exists("Role", role)
+		}
+		# Ensure baseline is clean — guard against test ordering side-effects.
+		for role in baseline:
+			if baseline[role].desk_access:
+				frappe.db.set_value("Role", role, "desk_access", 0)
+				baseline[role] = frappe.db.get_value(
+					"Role", role, ["desk_access", "modified"], as_dict=True
+				)
+
+		enforce_lms_roles_desk_access()
+
+		for role, before in baseline.items():
+			after = frappe.db.get_value("Role", role, ["desk_access", "modified"], as_dict=True)
+			self.assertEqual(after.desk_access, 0, f"{role} desk_access drifted")
+			self.assertEqual(
+				str(after.modified), str(before.modified), f"{role} was modified unnecessarily"
+			)
 
 	def test_reset_user_course_progress_sweeps_only_course_and_untagged_reusable_quiz_submissions(self):
 		member = self._create_user(
