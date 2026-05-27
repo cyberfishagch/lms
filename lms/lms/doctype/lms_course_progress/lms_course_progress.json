@@ -8,6 +8,7 @@
   "member",
   "member_name",
   "status",
+  "video_watched_at",
   "column_break_3",
   "lesson",
   "chapter",
@@ -54,6 +55,12 @@
    "label": "Status",
    "options": "Complete\nPartially Complete\nIncomplete",
    "search_index": 1
+  },
+  {
+   "fieldname": "video_watched_at",
+   "fieldtype": "Datetime",
+   "label": "Video Watched At",
+   "read_only": 1
   },
   {
    "fieldname": "column_break_3",

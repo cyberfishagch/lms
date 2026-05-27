@@ -8,8 +8,11 @@ from lms.lms.api import (
 	clone_course,
 	clone_lesson_into_chapter,
 	clone_quiz,
+	mark_lesson_progress,
+	mark_video_watched,
 	reset_user_course_progress,
 )
+from lms.lms.doctype.course_lesson.course_lesson import save_progress
 from lms.lms.doctype.lms_quiz.lms_quiz import quiz_summary
 
 
@@ -396,6 +399,150 @@ class TestCourseCloneAndProgressRegressions(FrappeTestCase):
 		self.assertEqual(enrollment.progress, 0)
 		self.assertIsNone(enrollment.current_lesson)
 
+	def test_video_lesson_cannot_complete_before_video_is_watched(self):
+		member, course, lesson, _enrollment = self._create_video_progress_fixture()
+
+		frappe.set_user(member.name)
+		with self.assertRaises(frappe.ValidationError):
+			save_progress(lesson.name, course.name)
+
+		self.assertFalse(
+			frappe.db.exists(
+				"LMS Course Progress",
+				{"course": course.name, "member": member.name, "lesson": lesson.name, "status": "Complete"},
+			)
+		)
+
+	def test_mark_video_watched_records_incomplete_progress_only(self):
+		member, course, lesson, enrollment = self._create_video_progress_fixture()
+
+		frappe.set_user(member.name)
+		result = mark_video_watched(course.name, 1, 1)
+
+		self.assertTrue(result["video_watched"])
+		progress = frappe.db.get_value(
+			"LMS Course Progress",
+			{"course": course.name, "member": member.name, "lesson": lesson.name},
+			["status", "video_watched_at"],
+			as_dict=True,
+		)
+		self.assertEqual(progress.status, "Incomplete")
+		self.assertIsNotNone(progress.video_watched_at)
+		enrollment.reload()
+		self.assertEqual(enrollment.progress, 0)
+
+	def test_mark_video_watched_is_idempotent(self):
+		member, course, lesson, _enrollment = self._create_video_progress_fixture()
+
+		frappe.set_user(member.name)
+		mark_video_watched(course.name, 1, 1)
+		progress_name = frappe.db.get_value(
+			"LMS Course Progress",
+			{"course": course.name, "member": member.name, "lesson": lesson.name},
+			"name",
+		)
+		first_watched_at = "2026-01-01 00:00:00"
+		frappe.db.set_value("LMS Course Progress", progress_name, "video_watched_at", first_watched_at)
+
+		result = mark_video_watched(course.name, 1, 1)
+
+		self.assertTrue(result["requires_video"])
+		self.assertTrue(result["video_watched"])
+		self.assertEqual(str(result["video_watched_at"]), first_watched_at)
+		self.assertEqual(
+			str(frappe.db.get_value("LMS Course Progress", progress_name, "video_watched_at")),
+			first_watched_at,
+		)
+
+	def test_mark_video_watched_noops_for_lessons_without_youtube(self):
+		member, course, lesson, _enrollment = self._create_video_progress_fixture(youtube=None)
+
+		frappe.set_user(member.name)
+		result = mark_video_watched(course.name, 1, 1)
+
+		self.assertEqual(result["status"], "ok")
+		self.assertFalse(result["requires_video"])
+		self.assertFalse(result["video_watched"])
+		self.assertIsNone(result["video_watched_at"])
+		self.assertFalse(
+			frappe.db.exists(
+				"LMS Course Progress",
+				{"course": course.name, "member": member.name, "lesson": lesson.name},
+			)
+		)
+
+	def test_video_lesson_completes_after_video_is_watched(self):
+		member, course, lesson, enrollment = self._create_video_progress_fixture()
+
+		frappe.set_user(member.name)
+		mark_video_watched(course.name, 1, 1)
+		save_progress(lesson.name, course.name)
+
+		progress = frappe.db.get_value(
+			"LMS Course Progress",
+			{"course": course.name, "member": member.name, "lesson": lesson.name},
+			["status", "video_watched_at"],
+			as_dict=True,
+		)
+		self.assertEqual(progress.status, "Complete")
+		self.assertIsNotNone(progress.video_watched_at)
+		enrollment.reload()
+		self.assertEqual(enrollment.progress, 100)
+
+	def test_mark_lesson_progress_upgrades_video_watched_row_to_complete(self):
+		member, course, lesson, enrollment = self._create_video_progress_fixture()
+
+		frappe.set_user(member.name)
+		mark_video_watched(course.name, 1, 1)
+		mark_lesson_progress(course.name, 1, 1)
+
+		progress = frappe.db.get_value(
+			"LMS Course Progress",
+			{"course": course.name, "member": member.name, "lesson": lesson.name},
+			["status", "video_watched_at"],
+			as_dict=True,
+		)
+		self.assertEqual(progress.status, "Complete")
+		self.assertIsNotNone(progress.video_watched_at)
+		enrollment.reload()
+		self.assertEqual(enrollment.progress, 100)
+
+	def test_reset_user_course_progress_clears_video_watched_gate(self):
+		member, course, lesson, _enrollment = self._create_video_progress_fixture()
+
+		frappe.set_user(member.name)
+		mark_video_watched(course.name, 1, 1)
+		save_progress(lesson.name, course.name)
+
+		frappe.set_user("Administrator")
+		reset_user_course_progress(course.name, member.name)
+		self.assertFalse(
+			frappe.db.exists(
+				"LMS Course Progress",
+				{"course": course.name, "member": member.name, "lesson": lesson.name},
+			)
+		)
+
+		frappe.set_user(member.name)
+		with self.assertRaises(frappe.ValidationError):
+			save_progress(lesson.name, course.name)
+
+	def test_reset_user_course_progress_clears_incomplete_video_watched_row(self):
+		member, course, lesson, _enrollment = self._create_video_progress_fixture()
+
+		frappe.set_user(member.name)
+		mark_video_watched(course.name, 1, 1)
+
+		frappe.set_user("Administrator")
+		reset_user_course_progress(course.name, member.name)
+
+		self.assertFalse(
+			frappe.db.exists(
+				"LMS Course Progress",
+				{"course": course.name, "member": member.name, "lesson": lesson.name},
+			)
+		)
+
 	def test_clone_chapter_into_course_brings_lessons_and_reuses_quizzes(self):
 		source = self._create_course(
 			title=f"Chapter Clone Source {frappe.generate_hash(length=8)}",
@@ -596,6 +743,27 @@ class TestCourseCloneAndProgressRegressions(FrappeTestCase):
 		self.cleanup_items.append(("LMS Course Progress", progress.name))
 		return progress
 
+	def _create_video_progress_fixture(self, youtube="https://www.youtube.com/watch?v=dQw4w9WgXcQ"):
+		member = self._create_user(
+			f"video-progress-{frappe.generate_hash(length=8)}@example.com",
+			"Video",
+			"Progress",
+			["LMS Student"],
+		)
+		course = self._create_course(
+			title=f"Video Progress Course {frappe.generate_hash(length=8)}",
+			instructor="Administrator",
+		)
+		chapter = self._insert_chapter(course.name, "Video Chapter")
+		lesson = self._insert_lesson(
+			course.name,
+			chapter.name,
+			"Video Lesson",
+			youtube=youtube,
+		)
+		enrollment = self._create_enrollment(member.name, course.name)
+		return member, course, lesson, enrollment
+
 	def _insert_chapter(self, course, title):
 		chapter = frappe.get_doc(
 			{
@@ -616,6 +784,7 @@ class TestCourseCloneAndProgressRegressions(FrappeTestCase):
 		quiz_id=None,
 		content='{"blocks":[]}',
 		instructor_content=None,
+		youtube=None,
 	):
 		idx = frappe.db.count("Course Lesson", {"chapter": chapter}) + 1
 		lesson = frappe.get_doc(
@@ -626,6 +795,7 @@ class TestCourseCloneAndProgressRegressions(FrappeTestCase):
 				"idx": idx,
 				"title": title,
 				"quiz_id": quiz_id,
+				"youtube": youtube,
 				"content": content,
 				"instructor_content": instructor_content,
 			}

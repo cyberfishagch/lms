@@ -1231,11 +1231,75 @@ def delete_scorm_package(scorm_package_path: str):
 
 @frappe.whitelist()
 def mark_lesson_progress(course: str, chapter_number: int, lesson_number: int):
+	lesson_name = get_lesson_from_course_position(course, chapter_number, lesson_number)
+	save_progress(lesson_name, course)
+
+
+@frappe.whitelist()
+def mark_video_watched(course: str, chapter_number: int, lesson_number: int):
+	lesson_name = get_lesson_from_course_position(course, chapter_number, lesson_number)
+	membership = frappe.db.exists("LMS Enrollment", {"course": course, "member": frappe.session.user})
+	if not membership:
+		frappe.throw(_("You are not enrolled in this course."), frappe.PermissionError)
+
+	if not frappe.db.get_value("Course Lesson", lesson_name, "youtube"):
+		return {
+			"status": "ok",
+			"requires_video": False,
+			"video_watched": False,
+			"video_watched_at": None,
+		}
+
+	filters = {"course": course, "lesson": lesson_name, "member": frappe.session.user}
+	progress = frappe.db.get_value(
+		"LMS Course Progress",
+		filters,
+		["name", "video_watched_at"],
+		as_dict=True,
+	)
+
+	if progress and progress.video_watched_at:
+		return {
+			"status": "ok",
+			"requires_video": True,
+			"video_watched": True,
+			"video_watched_at": progress.video_watched_at,
+		}
+
+	video_watched_at = now()
+	if progress:
+		frappe.db.set_value("LMS Course Progress", progress.name, "video_watched_at", video_watched_at)
+	else:
+		frappe.get_doc(
+			{
+				"doctype": "LMS Course Progress",
+				"course": course,
+				"lesson": lesson_name,
+				"status": "Incomplete",
+				"member": frappe.session.user,
+				"video_watched_at": video_watched_at,
+			}
+		).save(ignore_permissions=True)
+
+	return {
+		"status": "ok",
+		"requires_video": True,
+		"video_watched": True,
+		"video_watched_at": video_watched_at,
+	}
+
+
+def get_lesson_from_course_position(course: str, chapter_number: int, lesson_number: int):
 	chapter_name = frappe.get_value("Chapter Reference", {"parent": course, "idx": chapter_number}, "chapter")
+	if not chapter_name:
+		frappe.throw(_("Chapter not found."), frappe.DoesNotExistError)
+
 	lesson_name = frappe.get_value(
 		"Lesson Reference", {"parent": chapter_name, "idx": lesson_number}, "lesson"
 	)
-	save_progress(lesson_name, course)
+	if not lesson_name:
+		frappe.throw(_("Lesson not found."), frappe.DoesNotExistError)
+	return lesson_name
 
 
 @frappe.whitelist()
