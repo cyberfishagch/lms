@@ -1041,15 +1041,25 @@ def get_lesson(course: str, chapter: int, lesson: int) -> dict:
 		as_dict=True,
 	)
 
+	progress_details = None
 	if frappe.session.user == "Guest":
 		progress = 0
 	else:
 		progress = get_progress(course, lesson_details.name)
+		progress_details = frappe.db.get_value(
+			"LMS Course Progress",
+			{"course": course, "lesson": lesson_details.name, "member": frappe.session.user},
+			["status", "video_watched_at"],
+			as_dict=True,
+		)
 
 	lesson_details.chapter_title = frappe.db.get_value("Course Chapter", chapter_name, "title")
 	neighbours = get_neighbour_lesson(course, chapter, lesson)
 	lesson_details.next = neighbours["next"]
 	lesson_details.progress = progress
+	lesson_details.is_complete = bool(progress_details and progress_details.status == "Complete")
+	lesson_details.video_watched_at = progress_details.video_watched_at if progress_details else None
+	lesson_details.video_watched = bool(progress_details and progress_details.video_watched_at)
 	lesson_details.prev = neighbours["prev"]
 	lesson_details.membership = membership
 	lesson_details.icon = get_lesson_icon(lesson_details.body, lesson_details.content)

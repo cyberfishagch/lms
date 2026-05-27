@@ -146,11 +146,11 @@ def save_progress(lesson: str, course: str, scorm_details: dict = None):
 
 	frappe.db.set_value("LMS Enrollment", membership, "current_lesson", lesson)
 	progress_already_exists = frappe.db.exists(
-		"LMS Course Progress", {"lesson": lesson, "member": frappe.session.user}
+		"LMS Course Progress", {"course": course, "lesson": lesson, "member": frappe.session.user}
 	)
 	lesson_already_completed = frappe.db.exists(
 		"LMS Course Progress",
-		{"lesson": lesson, "member": frappe.session.user, "status": "Complete"},
+		{"course": course, "lesson": lesson, "member": frappe.session.user, "status": "Complete"},
 	)
 
 	quiz_completed = get_quiz_progress(lesson)
@@ -159,20 +159,26 @@ def save_progress(lesson: str, course: str, scorm_details: dict = None):
 	if scorm_details:
 		scorm_details = frappe._dict(**scorm_details)
 
-	if not progress_already_exists and quiz_completed and assignment_completed and not scorm_details:
-		frappe.get_doc(
-			{
-				"doctype": "LMS Course Progress",
-				"lesson": lesson,
-				"status": "Complete",
-				"member": frappe.session.user,
-			}
-		).save(ignore_permissions=True)
+	if quiz_completed and assignment_completed and not scorm_details and not lesson_already_completed:
+		assert_video_watched_if_required(lesson, course, frappe.session.user)
+		if progress_already_exists:
+			frappe.db.set_value("LMS Course Progress", progress_already_exists, "status", "Complete")
+		else:
+			frappe.get_doc(
+				{
+					"doctype": "LMS Course Progress",
+					"course": course,
+					"lesson": lesson,
+					"status": "Complete",
+					"member": frappe.session.user,
+				}
+			).save(ignore_permissions=True)
 	elif scorm_details and not lesson_already_completed and not progress_already_exists:
 		# Create new SCORM progress
 		frappe.get_doc(
 			{
 				"doctype": "LMS Course Progress",
+				"course": course,
 				"lesson": lesson,
 				"status": "Complete" if scorm_details.is_complete else "Partially Complete",
 				"member": frappe.session.user,
@@ -186,6 +192,7 @@ def save_progress(lesson: str, course: str, scorm_details: dict = None):
 			progress_already_exists,
 			{
 				"lesson": lesson,
+				"course": course,
 				"status": "Complete" if scorm_details.is_complete else "Partially Complete",
 				"member": frappe.session.user,
 				"scorm_content": "" if scorm_details.is_complete else scorm_details.scorm_content,
@@ -209,6 +216,22 @@ def save_progress(lesson: str, course: str, scorm_details: dict = None):
 	)
 
 	return progress
+
+
+def assert_video_watched_if_required(lesson: str, course: str, member: str):
+	if not frappe.db.get_value("Course Lesson", lesson, "youtube"):
+		return
+
+	video_watched_at = frappe.db.get_value(
+		"LMS Course Progress",
+		{"lesson": lesson, "course": course, "member": member},
+		"video_watched_at",
+	)
+	if not video_watched_at:
+		frappe.throw(
+			_("Please watch the video before completing this lesson."),
+			frappe.ValidationError,
+		)
 
 
 def capture_progress_for_analytics():
