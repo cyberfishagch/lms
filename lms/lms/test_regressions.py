@@ -744,6 +744,67 @@ class TestCourseCloneAndProgressRegressions(FrappeTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			clone_chapter_into_course(chapter.name, target.name)
 
+	def test_course_completion_auto_issues_certificate_once(self):
+		from lms.lms.doctype.lms_certificate.lms_certificate import (
+			create_certificate,
+			issue_certificate_on_completion,
+		)
+
+		member = self._create_user(
+			f"cert-autoissue-{frappe.generate_hash(length=8)}@example.com",
+			"Cert",
+			"Autoissue",
+			["LMS Student"],
+		)
+		course = self._create_course(
+			title=f"Cert Autoissue Course {frappe.generate_hash(length=8)}",
+			instructor="Administrator",
+		)
+		frappe.db.set_value("LMS Course", course.name, "enable_certification", 1)
+		enrollment = self._create_enrollment(member.name, course.name)
+		frappe.db.set_value("LMS Enrollment", enrollment.name, "progress", 100)
+
+		frappe.set_user(member.name)
+		# Completing a certifiable course issues exactly one certificate, and a
+		# second pass is a no-op (the choke point fires on every save_progress).
+		issue_certificate_on_completion(course.name)
+		issue_certificate_on_completion(course.name)
+
+		certs = frappe.get_all(
+			"LMS Certificate", {"member": member.name, "course": course.name}, pluck="name"
+		)
+		self.cleanup_items.extend(("LMS Certificate", name) for name in certs)
+		self.assertEqual(len(certs), 1)
+
+		# create_certificate must return the existing cert, not raise NameError on
+		# the already-certified branch (regression for the undefined-var bug).
+		existing = create_certificate(course.name)
+		self.assertEqual(existing["name"], certs[0])
+
+	def test_course_completion_does_not_certify_staff(self):
+		from lms.lms.doctype.lms_certificate.lms_certificate import issue_certificate_on_completion
+
+		member = self._create_user(
+			f"cert-staff-{frappe.generate_hash(length=8)}@example.com",
+			"Cert",
+			"Staff",
+			["LMS Student", "Course Creator"],
+		)
+		course = self._create_course(
+			title=f"Cert Staff Course {frappe.generate_hash(length=8)}",
+			instructor="Administrator",
+		)
+		frappe.db.set_value("LMS Course", course.name, "enable_certification", 1)
+		enrollment = self._create_enrollment(member.name, course.name)
+		frappe.db.set_value("LMS Enrollment", enrollment.name, "progress", 100)
+
+		frappe.set_user(member.name)
+		issue_certificate_on_completion(course.name)
+
+		self.assertFalse(
+			frappe.db.exists("LMS Certificate", {"member": member.name, "course": course.name})
+		)
+
 	def _create_quiz_without_questions(self):
 		quiz = frappe.get_doc(
 			{
