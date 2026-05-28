@@ -162,9 +162,10 @@ def is_certified(course):
 
 @frappe.whitelist()
 def create_certificate(course: str):
-	if is_certified(course):
+	existing = is_certified(course)
+	if existing:
 		return frappe.db.get_value(
-			"LMS Certificate", certificate, ["name", "course", "template"], as_dict=True
+			"LMS Certificate", existing, ["name", "course", "template"], as_dict=True
 		)
 
 	else:
@@ -181,6 +182,31 @@ def create_certificate(course: str):
 		)
 		certificate.save(ignore_permissions=True)
 		return certificate
+
+
+def issue_certificate_on_completion(course: str):
+	"""Best-effort certificate issuance when a learner finishes a course.
+
+	Called from ``save_progress`` once enrollment progress reaches 100%. That is
+	the single server-side point every completion path funnels through (video
+	auto-complete, quiz pass, explicit "Finish"), so issuance no longer depends
+	on which UI control the learner used. Never raises — a cert failure must not
+	roll back the lesson-completion transaction. Skips staff to keep certs
+	learner-only and to stop course previews from minting real ones.
+	"""
+	if not frappe.db.get_value("LMS Course", course, "enable_certification"):
+		return
+	if set(frappe.get_roles(frappe.session.user)) & {"Moderator", "Course Creator", "Batch Evaluator"}:
+		return
+	if is_certified(course):
+		return
+	try:
+		create_certificate(course)
+	except Exception:
+		frappe.log_error(
+			title="LMS auto-issue certificate failed",
+			message=frappe.get_traceback(with_context=True),
+		)
 
 
 def get_default_certificate_template():

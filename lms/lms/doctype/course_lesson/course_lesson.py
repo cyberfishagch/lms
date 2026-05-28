@@ -208,6 +208,11 @@ def save_progress(lesson: str, course: str, scorm_details: dict = None):
 	enrollment.save()
 	enrollment.run_method("on_change")
 
+	if progress and progress >= 100:
+		from lms.lms.doctype.lms_certificate.lms_certificate import issue_certificate_on_completion
+
+		issue_certificate_on_completion(course)
+
 	frappe.publish_realtime(
 		event="update_lesson_progress",
 		room=get_website_room(),
