@@ -988,8 +988,10 @@ def delete_course(course: str):
 
 	frappe.db.delete("LMS Enrollment", {"course": course})
 	frappe.db.delete("LMS Course Progress", {"course": course})
-	frappe.db.set_value("LMS Quiz", {"course": course}, "course", None)
+	frappe.db.set_value("LMS Quiz", {"course": course}, {"course": None, "lesson": None})
 	frappe.db.set_value("LMS Quiz Submission", {"course": course}, "course", None)
+	# Detach (don't delete) certificates so learners keep their earned credential.
+	frappe.db.set_value("LMS Certificate", {"course": course}, "course", None)
 
 	chapters = frappe.get_all("Course Chapter", {"course": course}, pluck="name")
 	frappe.db.delete("Chapter Reference", {"parent": course})
@@ -1009,6 +1011,10 @@ def delete_course(course: str):
 			for topic in topics:
 				frappe.db.delete("Discussion Reply", {"topic": topic})
 				frappe.db.delete("Discussion Topic", topic)
+
+			# Video-watch rows hard-link to the lesson (reqd) — clear them so the
+			# lesson can be deleted.
+			frappe.db.delete("LMS Video Watch Duration", {"lesson": lesson})
 
 			frappe.delete_doc("Course Lesson", lesson)
 

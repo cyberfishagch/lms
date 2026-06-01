@@ -1,5 +1,8 @@
 import frappe
-from frappe.tests import UnitTestCase
+try:
+	from frappe.tests import UnitTestCase  # noqa: F401
+except ImportError:  # older frappe — fall back
+	from frappe.tests.utils import FrappeTestCase as UnitTestCase  # type: ignore
 from frappe.utils import add_days, nowdate
 
 from lms.lms.doctype.lms_certificate.lms_certificate import get_default_certificate_template
