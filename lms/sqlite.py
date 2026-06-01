@@ -35,6 +35,11 @@ class LearningSearch(SQLiteSearch):
 				"owner",
 				{"modified": "published_on"},
 			],
+			# Exclude soft-deleted courses from the search index. Per-doc
+			# updates on the trash flag are handled by explicit
+			# LearningSearch.remove_doc / index_doc calls in delete_course /
+			# restore_course; this filter ensures full rebuilds also stay clean.
+			"filters": {"is_deleted": 0},
 		},
 		"LMS Batch": {
 			"fields": [
@@ -140,6 +145,10 @@ class LearningSearch(SQLiteSearch):
 
 		if doc.doctype == "Course Instructor":
 			document = self.get_instructor_details(doc, document)
+			# `get_instructor_details` returns None when the parent course
+			# is soft-deleted — don't index this row.
+			if document is None:
+				return None
 		else:
 			if not document.get("modified"):
 				self.set_modified_date(doc, doc.doctype, document)
@@ -150,6 +159,14 @@ class LearningSearch(SQLiteSearch):
 		instructor = frappe.db.get_value("User", doc.instructor, "full_name")
 		fields = self.COURSE_FIELDS if doc.parenttype == "LMS Course" else self.BATCH_FIELDS
 		details = frappe.db.get_value(doc.parenttype, doc.parent, fields, as_dict=True)
+
+		# Skip indexing if the parent course is soft-deleted — instructor
+		# search must not surface a trashed course's title.
+		if doc.parenttype == "LMS Course" and details and details.get("name"):
+			if frappe.db.has_column("LMS Course", "is_deleted") and frappe.db.get_value(
+				"LMS Course", details.name, "is_deleted"
+			):
+				return None
 
 		if details:
 			document["doctype"] = doc.parenttype

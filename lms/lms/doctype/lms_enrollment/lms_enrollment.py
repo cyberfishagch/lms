@@ -38,9 +38,14 @@ class LMSEnrollment(Document):
 		course_details = frappe.db.get_value(
 			"LMS Course",
 			self.course,
-			["published", "disable_self_learning", "paid_course", "paid_certificate"],
+			["published", "disable_self_learning", "paid_course", "paid_certificate", "is_deleted"],
 			as_dict=True,
 		)
+
+		# Refuse enrollment to a soft-deleted course — for EVERYONE including
+		# admins via bulk-enroll. Admins must restore the course first.
+		if course_details.is_deleted:
+			frappe.throw(_("This course has been deleted. Restore it from Trash before enrolling learners."))
 
 		if course_details.disable_self_learning and not is_admin():
 			frappe.throw(
@@ -95,3 +100,29 @@ def update_program_progress(member):
 
 		average_progress = ceil(total_progress / len(courses))
 		frappe.db.set_value("LMS Program Member", program.name, "progress", average_progress)
+
+
+def get_permission_query_conditions(user):
+	"""Hide enrollments to soft-deleted courses from list queries.
+
+	Critical companion to LMSCourse's hook: learner pages and many admin
+	pages query `LMS Enrollment` directly (Dashboard, MyCourses, admin
+	enrollment list, admin analytics, etc.). Without this hook the LMS
+	Course filter wouldn't help — the Enrollment rows would still surface
+	the soft-deleted course.
+
+	Same bypass rules as LMSCourse: respect `lms_show_trash`, never filter
+	during migrate/patch/install, defensively no-op if the LMS Course column
+	doesn't exist yet.
+	"""
+	if frappe.flags.in_migrate or frappe.flags.in_patch or frappe.flags.in_install:
+		return None
+	if getattr(frappe.flags, "lms_show_trash", False):
+		return None
+	if not frappe.db.has_column("LMS Course", "is_deleted"):
+		return None
+	return (
+		"EXISTS (SELECT 1 FROM `tabLMS Course` `c` "
+		"WHERE `c`.`name` = `tabLMS Enrollment`.`course` "
+		"AND `c`.`is_deleted` = 0)"
+	)

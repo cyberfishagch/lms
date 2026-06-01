@@ -76,6 +76,14 @@ class LMSCertificate(Document):
 
 	def validate_course_enrollment(self):
 		if self.course:
+			# Refuse cert issuance on a soft-deleted course. Existing certs
+			# stay intact — this only blocks NEW issuances on a trashed course.
+			from lms.lms.utils import is_course_deleted
+
+			if is_course_deleted(self.course):
+				frappe.throw(
+					_("Certification cannot be issued: this course has been deleted.")
+				)
 			is_enrolled = frappe.db.exists("LMS Enrollment", {"course": self.course, "member": self.member})
 			if not is_enrolled:
 				frappe.throw(
@@ -230,6 +238,11 @@ def get_default_certificate_template():
 
 
 def validate_certification_eligibility(course):
+	from lms.lms.utils import is_course_deleted
+
+	if is_course_deleted(course):
+		frappe.throw(_("This course has been deleted."))
+
 	if not frappe.db.exists("LMS Enrollment", {"course": course, "member": frappe.session.user}):
 		frappe.throw(_("You are not enrolled in this course."))
 

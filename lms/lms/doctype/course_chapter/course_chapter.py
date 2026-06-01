@@ -72,4 +72,8 @@ class CourseChapter(Document):
 
 	def update_lesson_count(self):
 		"""Update lesson count in the course"""
+		# Skip for a soft-deleted parent course; the counter is for live
+		# course UIs and trashed courses are hidden anyway.
+		if frappe.db.get_value("LMS Course", self.course, "is_deleted"):
+			return
 		frappe.db.set_value("LMS Course", self.course, "lessons", get_lesson_count(self.course))

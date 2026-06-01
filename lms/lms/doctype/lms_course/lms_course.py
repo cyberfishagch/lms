@@ -20,6 +20,7 @@ from ...utils import (
 
 class LMSCourse(Document):
 	def validate(self):
+		self.validate_not_deleted_for_edit()
 		self.validate_published()
 		self.validate_instructors()
 		self.validate_video_link()
@@ -29,6 +30,38 @@ class LMSCourse(Document):
 		self.validate_amount_and_currency()
 		self.image = validate_image(self.image)
 		self.validate_card_gradient()
+
+	def validate_not_deleted_for_edit(self):
+		"""Refuse user-initiated edits to a soft-deleted course.
+
+		Flipping the trash flags themselves (entering or leaving Trash) is
+		always allowed, otherwise restore would be blocked by its own guard.
+		`frappe.db.set_value` bypasses `validate` entirely, so internal
+		scheduled writes (e.g. update_course_statistics counters) still work;
+		each such call site has its own explicit `is_deleted` gate.
+		"""
+		if not self.is_deleted:
+			return
+		if self.has_value_changed("is_deleted"):
+			return  # entering or leaving Trash
+		# If only the trash audit fields changed, allow.
+		changed = {
+			f
+			for f in ("is_deleted", "deleted_on", "deleted_by", "published")
+			if self.has_value_changed(f)
+		}
+		non_trash_changes = any(
+			self.has_value_changed(f.fieldname)
+			for f in self.meta.get("fields")
+			if f.fieldname not in changed
+		)
+		if non_trash_changes:
+			frappe.throw(
+				_(
+					"This course is in Trash and cannot be edited. Restore it from the Trash view first."
+				),
+				title=_("Course in Trash"),
+			)
 
 	def validate_published(self):
 		if self.published and not self.published_on:
@@ -101,6 +134,9 @@ class LMSCourse(Document):
 			self.card_gradient = random.choice(colors)
 
 	def on_update(self):
+		if self.is_deleted:
+			# Trashed course must never email interested users about availability.
+			return
 		if not self.upcoming and self.has_value_changed("upcoming"):
 			self.send_email_to_interested_users()
 
@@ -213,3 +249,30 @@ def send_system_notification_for_published_courses(courses):
 		)
 		make_notification_logs(notification, students)
 		frappe.db.set_value("LMS Course", course.name, "notification_sent", 1)
+
+
+def get_permission_query_conditions(user):
+	"""Hide soft-deleted LMS Course rows from list queries.
+
+	Frappe applies this hook only to `frappe.get_all` / `frappe.get_list` and
+	to Desk autocompletes via `search_link`. It does NOT cover `frappe.db.*`
+	low-level calls (get_value, exists, count, qb, raw SQL) — those need
+	explicit `is_deleted` filters at the call site.
+
+	Bypasses:
+	- `frappe.flags.lms_show_trash` is set by the Trash UI endpoint so admins
+	  can see trashed courses.
+	- During migrate / patches / install we never filter — pending patches
+	  may need to iterate every row including trashed ones.
+
+	Defensive: if the `is_deleted` column doesn't exist yet (migration window
+	on a fresh deploy before `bench migrate` has run), no filter — old data
+	is fine, the schema add is backward-compatible.
+	"""
+	if frappe.flags.in_migrate or frappe.flags.in_patch or frappe.flags.in_install:
+		return None
+	if getattr(frappe.flags, "lms_show_trash", False):
+		return None
+	if not frappe.db.has_column("LMS Course", "is_deleted"):
+		return None
+	return "`tabLMS Course`.is_deleted = 0"
