@@ -1386,6 +1386,31 @@ def delete_scorm_package(scorm_package_path: str):
 
 
 @frappe.whitelist()
+def delete_quiz(quiz: str):
+	"""Delete an LMS Quiz without tripping Frappe's link integrity check.
+
+	`LMS Quiz Submission.quiz` is a Link field; with even one submission
+	on the quiz, a raw `frappe.delete_doc("LMS Quiz", ...)` (or the REST
+	DELETE the admin UI used to hit) raises LinkExistsError. We detach
+	the submissions first (NULL out `quiz`) so learner attempt history
+	is preserved without the link constraint blocking deletion.
+
+	Note: Course Lesson's `quiz_id` is a Data field (not a Link), so it
+	does not block deletion. Lessons referencing this quiz will simply
+	render an empty quiz slot after deletion — same behaviour as before
+	this fix.
+	"""
+	if not frappe.has_permission("LMS Quiz", "delete", quiz):
+		frappe.throw(
+			_("You do not have permission to delete this quiz."), frappe.PermissionError
+		)
+
+	frappe.db.set_value("LMS Quiz Submission", {"quiz": quiz}, "quiz", None)
+
+	frappe.delete_doc("LMS Quiz", quiz)
+
+
+@frappe.whitelist()
 def mark_lesson_progress(course: str, chapter_number: int, lesson_number: int):
 	from lms.lms.utils import assert_course_not_deleted
 
