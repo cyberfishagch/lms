@@ -883,6 +883,14 @@ def get_course_details(course: str):
 	if not guest_access_allowed():
 		return {}
 
+	# Soft-deleted courses are hidden from learners — even ones with stale
+	# enrollment rows. Only `can_modify_course` can see the deleted row (for
+	# the admin restore UI which sets `lms_show_trash` and reads the doc
+	# directly anyway). The previous `published OR can_modify OR membership`
+	# gate leaked here because the membership branch defeats the published check.
+	if is_course_deleted(course) and not can_modify_course(course):
+		return {}
+
 	is_course_published = frappe.db.get_value("LMS Course", course, "published")
 	membership = get_membership(course)
 	if not is_course_published and not can_modify_course(course) and not membership:
@@ -984,6 +992,12 @@ def get_course_outline(course: str, progress: bool = False) -> list:
 @rate_limit(limit=500, seconds=60 * 60)
 def get_lesson(course: str, chapter: int, lesson: int) -> dict:
 	if not guest_access_allowed():
+		return {}
+
+	# Reachable via direct deep-link; gate on the REQUESTED course's trash
+	# state (not the resolved lesson's `.course` field — that may legitimately
+	# point at a different course in shared-resource edge cases).
+	if is_course_deleted(course) and not can_modify_course(course):
 		return {}
 
 	chapter_name = frappe.db.get_value("Chapter Reference", {"parent": course, "idx": chapter}, "chapter")
@@ -1707,6 +1721,7 @@ def get_order_summary(doctype: str, docname: str, coupon: str = None, country: s
 
 
 def get_paid_course_details(docname: str) -> dict:
+	assert_course_not_deleted(docname)
 	details = frappe.db.get_value(
 		"LMS Course",
 		docname,
@@ -1824,6 +1839,7 @@ def calculate_discount_amount(base_amount: float, coupon: dict) -> float:
 @frappe.whitelist()
 def get_lesson_creation_details(course: str, chapter: int, lesson: int) -> dict:
 	frappe.only_for(["Moderator", "Course Creator"])
+	assert_course_not_deleted(course)
 	chapter_name = frappe.db.get_value("Chapter Reference", {"parent": course, "idx": chapter}, "chapter")
 	lesson_name = frappe.db.get_value("Lesson Reference", {"parent": chapter_name, "idx": lesson}, "lesson")
 
@@ -2242,7 +2258,11 @@ def get_related_courses(course: str) -> list:
 	related_courses = frappe.get_all("Related Courses", {"parent": course}, order_by="idx", pluck="course")
 
 	for related_course in related_courses:
-		related_course_details.append(get_course_details(related_course))
+		details = get_course_details(related_course)
+		# get_course_details returns {} for soft-deleted courses; skip those
+		# rather than render an empty related-course card.
+		if details.get("name"):
+			related_course_details.append(details)
 	return related_course_details
 
 
@@ -2293,6 +2313,30 @@ def validate_batch_access(batch: str):
 	)
 	if not enrollment_exists:
 		frappe.throw(_("You do not have access to this batch."))
+
+
+def is_course_deleted(course: str) -> bool:
+	"""Return True if the course is in Trash (soft-deleted).
+
+	Defensive against the migration window where the column doesn't yet
+	exist — return False (not-deleted) rather than 500.
+	"""
+	if not course:
+		return False
+	if not frappe.db.has_column("LMS Course", "is_deleted"):
+		return False
+	return bool(frappe.db.get_value("LMS Course", course, "is_deleted"))
+
+
+def assert_course_not_deleted(course: str):
+	"""Throw if the course is soft-deleted. Used by endpoints that operate
+	on a course name and shouldn't proceed for trashed courses.
+	"""
+	if is_course_deleted(course):
+		frappe.throw(
+			_("This course has been deleted."),
+			title=_("Course not available"),
+		)
 
 
 def can_modify_course(course: str) -> bool:

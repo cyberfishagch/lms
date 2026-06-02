@@ -84,6 +84,11 @@ def get_translations():
 @frappe.whitelist()
 def validate_billing_access(billing_type: str, name: str):
 	doctype = "LMS Batch" if billing_type == "batch" else "LMS Course"
+	if doctype == "LMS Course":
+		# Refuse billing on a soft-deleted course before any pricing/coupon work.
+		from lms.lms.utils import assert_course_not_deleted
+
+		assert_course_not_deleted(name)
 	access, message = verify_billing_access(doctype, name, billing_type)
 
 	address = frappe.db.get_value(
@@ -223,6 +228,7 @@ def get_chart_details():
 		{
 			"published": 1,
 			"upcoming": 0,
+			"is_deleted": 0,
 		},
 	)
 	details.users = frappe.db.count("User", {"enabled": 1, "name": ["not in", ("Administrator", "Guest")]})
@@ -926,7 +932,10 @@ def get_new_gateway_fields(doctype: str):
 
 
 def update_course_statistics():
-	courses = frappe.get_all("LMS Course", fields=["name"])
+	# Skip soft-deleted courses — recomputing aggregates on trash is wasted
+	# work, and the writes would also tick `modified` (re-triggering the
+	# search reindex hook on Course Instructor children).
+	courses = frappe.get_all("LMS Course", filters={"is_deleted": 0}, fields=["name"])
 
 	for course in courses:
 		lessons = get_lesson_count(course.name)
@@ -983,8 +992,140 @@ def get_announcements(batch: str):
 
 @frappe.whitelist()
 def delete_course(course: str):
+	"""Soft-delete: move the course to Trash. All linked rows (chapters,
+	lessons, enrollments, progress, quizzes, certificates, video-watch)
+	remain intact. The course is hidden from learners and the default admin
+	list via the `permission_query_conditions` hook on LMS Course (and the
+	companion hook on LMS Enrollment). Reversible via `restore_course`.
+
+	For a true cascading delete (frees the slug, drops linked rows), use
+	`permanently_delete_course`.
+	"""
 	if not can_modify_course(course):
 		frappe.throw(_("You do not have permission to delete this course."), frappe.PermissionError)
+
+	doc = frappe.get_doc("LMS Course", course)
+	if doc.is_deleted:
+		return  # idempotent
+
+	doc.is_deleted = 1
+	doc.deleted_on = frappe.utils.now_datetime()
+	doc.deleted_by = frappe.session.user
+	# Hide from learners on the catalog/featured/popular paths too — those filter
+	# on `published=1` and that's the existing precedent for "not learner-visible".
+	doc.published = 0
+	doc.save(ignore_permissions=True)
+
+	# `doc.save()` triggers `on_update`, but the LearningSearch reindex hook
+	# only fires when one of the search config's tracked fields changes;
+	# `is_deleted` is not one of them. Explicitly remove from the index.
+	try:
+		from lms.sqlite import LearningSearch
+
+		search = LearningSearch()
+		if search.index_exists():
+			search.remove_doc("LMS Course", course)
+			# Course Instructor rows are indexed separately; remove those too
+			# so instructor-search doesn't surface the trashed course's title.
+			for inst_name in frappe.get_all(
+				"Course Instructor", {"parent": course}, pluck="name"
+			):
+				search.remove_doc("Course Instructor", inst_name)
+	except Exception:
+		# Don't let a search-index hiccup block the trash operation.
+		frappe.log_error("LearningSearch.remove_doc failed", "delete_course")
+
+
+@frappe.whitelist()
+def restore_course(course: str):
+	"""Restore a soft-deleted course to a Draft state (`published=0`).
+	Caller can publish separately."""
+	if not can_modify_course(course):
+		frappe.throw(_("You do not have permission to restore this course."), frappe.PermissionError)
+
+	doc = frappe.get_doc("LMS Course", course)
+	if not doc.is_deleted:
+		return  # idempotent
+
+	doc.is_deleted = 0
+	doc.deleted_on = None
+	doc.deleted_by = None
+	# Intentionally leave `published` at its current (0) value — restoring
+	# brings the course back as a Draft so the admin re-publishes deliberately.
+	doc.save(ignore_permissions=True)
+
+	# Re-add to the search index.
+	try:
+		from lms.sqlite import LearningSearch
+
+		search = LearningSearch()
+		if search.index_exists():
+			search.index_doc("LMS Course", course)
+			for inst_name in frappe.get_all(
+				"Course Instructor", {"parent": course}, pluck="name"
+			):
+				search.index_doc("Course Instructor", inst_name)
+	except Exception:
+		frappe.log_error("LearningSearch.index_doc failed", "restore_course")
+
+
+@frappe.whitelist()
+def get_trashed_courses(limit: int = 100, start: int = 0):
+	"""List soft-deleted courses for the admin Trash view. Sets
+	`frappe.flags.lms_show_trash` so the `permission_query_conditions` hook
+	on LMS Course (which otherwise hides trashed rows from every list query)
+	returns them. Moderator-only — instructors don't get a global trash view.
+	"""
+	frappe.only_for("Moderator")
+	frappe.flags.lms_show_trash = True
+	try:
+		return frappe.get_all(
+			"LMS Course",
+			filters={"is_deleted": 1},
+			fields=[
+				"name",
+				"title",
+				"published",
+				"paid_course",
+				"creation",
+				"deleted_on",
+				"deleted_by",
+			],
+			order_by="deleted_on desc",
+			limit=int(limit),
+			start=int(start),
+		)
+	finally:
+		frappe.flags.lms_show_trash = False
+
+
+@frappe.whitelist()
+def permanently_delete_course(course: str, force: bool = False):
+	"""Hard cascade: drops chapters/lessons/refs/discussion/enrollments/
+	progress/video-watch and the course doc itself. Certificates and quizzes
+	are DETACHED (course/lesson nulled) so learner credentials and reusable
+	quiz docs survive. This is irreversible.
+
+	Two-step gate: the course must already be in Trash (`is_deleted=1`)
+	unless `force=True` is passed. Wizard rollback for a partially-created
+	course uses `force=True`. Other callers must soft-delete first via the
+	Trash UI.
+
+	Restricted to Moderator. The lenient `can_modify_course` (allows
+	instructors) is intentionally NOT used here — destructive operations
+	deserve a stricter gate.
+	"""
+	frappe.only_for("Moderator")
+	# Coerce: Frappe form-encoded params arrive as strings.
+	if isinstance(force, str):
+		force = force.lower() in ("1", "true", "yes")
+
+	is_deleted = frappe.db.get_value("LMS Course", course, "is_deleted")
+	if not is_deleted and not force:
+		frappe.throw(
+			_("Move this course to Trash first, then permanently delete it from the Trash view."),
+			title=_("Two-step delete"),
+		)
 
 	frappe.db.delete("LMS Enrollment", {"course": course})
 	frappe.db.delete("LMS Course Progress", {"course": course})
@@ -1022,6 +1163,15 @@ def delete_course(course: str):
 		frappe.delete_doc("Course Chapter", chapter)
 
 	frappe.delete_doc("LMS Course", course)
+
+	try:
+		from lms.sqlite import LearningSearch
+
+		search = LearningSearch()
+		if search.index_exists():
+			search.remove_doc("LMS Course", course)
+	except Exception:
+		frappe.log_error("LearningSearch.remove_doc failed", "permanently_delete_course")
 
 
 @frappe.whitelist()
@@ -1237,12 +1387,18 @@ def delete_scorm_package(scorm_package_path: str):
 
 @frappe.whitelist()
 def mark_lesson_progress(course: str, chapter_number: int, lesson_number: int):
+	from lms.lms.utils import assert_course_not_deleted
+
+	assert_course_not_deleted(course)
 	lesson_name = get_lesson_from_course_position(course, chapter_number, lesson_number)
 	save_progress(lesson_name, course)
 
 
 @frappe.whitelist()
 def mark_video_watched(course: str, chapter_number: int, lesson_number: int):
+	from lms.lms.utils import assert_course_not_deleted
+
+	assert_course_not_deleted(course)
 	lesson_name = get_lesson_from_course_position(course, chapter_number, lesson_number)
 	membership = frappe.db.exists("LMS Enrollment", {"course": course, "member": frappe.session.user})
 	if not membership:
@@ -1557,6 +1713,9 @@ def cancel_evaluation(evaluation: dict):
 
 @frappe.whitelist()
 def get_certification_details(course: str):
+	from lms.lms.utils import assert_course_not_deleted
+
+	assert_course_not_deleted(course)
 	membership = None
 	filters = {"course": course, "member": frappe.session.user}
 
@@ -2069,6 +2228,7 @@ def get_created_courses():
 		.on(CourseInstructor.parent == Course.name)
 		.select(Course.name)
 		.where(CourseInstructor.instructor == frappe.session.user)
+		.where(Course.is_deleted == 0)
 		.orderby(Course.published_on, order=frappe.qb.desc)
 		.limit(3)
 	)
@@ -2078,7 +2238,9 @@ def get_created_courses():
 
 	for course in courses:
 		course_details = get_course_details(course)
-		created_courses.append(course_details)
+		# get_course_details returns {} for deleted/inaccessible courses — skip.
+		if course_details.get("name"):
+			created_courses.append(course_details)
 
 	return created_courses
 
@@ -2484,6 +2646,10 @@ def reset_user_course_progress(course: str, member: str) -> dict:
 			frappe.PermissionError,
 		)
 
+	from lms.lms.utils import assert_course_not_deleted
+
+	assert_course_not_deleted(course)
+
 	if not frappe.db.exists("LMS Enrollment", {"course": course, "member": member}):
 		frappe.throw(
 			_("No enrollment found for this user on this course."),
@@ -2582,6 +2748,10 @@ def delete_course_progress_for_preview(course: str):
 
 	if not course:
 		frappe.throw(_("course is required"))
+
+	from lms.lms.utils import assert_course_not_deleted
+
+	assert_course_not_deleted(course)
 
 	user = frappe.session.user
 
@@ -2700,6 +2870,10 @@ def clone_course(source_name: str) -> dict:
 
 	if not frappe.db.exists("LMS Course", source_name):
 		frappe.throw(_("Source course not found."), frappe.DoesNotExistError)
+
+	from lms.lms.utils import assert_course_not_deleted
+
+	assert_course_not_deleted(source_name)
 
 	source = frappe.get_doc("LMS Course", source_name)
 	source_dict = source.as_dict()
@@ -2986,6 +3160,14 @@ def clone_lesson_into_chapter(source_lesson: str, target_chapter: str) -> dict:
 	if not frappe.db.exists("Course Lesson", source_lesson):
 		frappe.throw(_("Source lesson not found."), frappe.DoesNotExistError)
 
+	from lms.lms.utils import assert_course_not_deleted
+
+	# Refuse if either source's parent course or the target course is in Trash.
+	source_course = frappe.db.get_value("Course Lesson", source_lesson, "course")
+	if source_course:
+		assert_course_not_deleted(source_course)
+	assert_course_not_deleted(target_course)
+
 	source = frappe.get_doc("Course Lesson", source_lesson)
 
 	try:
@@ -3044,6 +3226,14 @@ def clone_chapter_into_course(source_chapter: str, target_course: str) -> dict:
 
 	if not frappe.db.exists("Course Chapter", source_chapter):
 		frappe.throw(_("Source chapter not found."), frappe.DoesNotExistError)
+
+	from lms.lms.utils import assert_course_not_deleted
+
+	# Refuse if either the source's parent course or the target course is in Trash.
+	source_course = frappe.db.get_value("Course Chapter", source_chapter, "course")
+	if source_course:
+		assert_course_not_deleted(source_course)
+	assert_course_not_deleted(target_course)
 
 	source = frappe.get_doc("Course Chapter", source_chapter)
 
