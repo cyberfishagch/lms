@@ -25,6 +25,7 @@ from frappe.utils import (
 	get_datetime,
 	getdate,
 	now,
+	today,
 )
 from frappe.utils.response import Response
 from pypika import functions as fn
@@ -1090,6 +1091,7 @@ def get_trashed_courses(limit: int = 100, start: int = 0):
 				"creation",
 				"deleted_on",
 				"deleted_by",
+				"admin_notes",
 			],
 			order_by="deleted_on desc",
 			limit=int(limit),
@@ -2929,6 +2931,12 @@ def clone_course(source_name: str) -> dict:
 		if fieldname in skip_course_fields or fieldname in new_course_data:
 			continue
 		new_course_data[fieldname] = value
+
+	# Stamp admin_notes with a "Cloned from ..." prefix so variant lineage is
+	# obvious in the admin courses list. Preserves any source notes underneath.
+	stamp = f'Cloned from "{source.title}" on {today()}'
+	carried = (new_course_data.get("admin_notes") or "").strip()
+	new_course_data["admin_notes"] = f"{stamp}\n\n{carried}" if carried else stamp
 
 	# Instructors: copy the source's instructor list, ensure the cloning admin
 	# is in it. De-duped via dict (preserves source order, appends caller if
