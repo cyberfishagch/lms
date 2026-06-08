@@ -28,6 +28,7 @@
   "short_introduction",
   "column_break_viqw",
   "description",
+  "admin_notes",
   "section_break_gglp",
   "chapters",
   "related_courses",
@@ -301,6 +302,12 @@
    "read_only": 1
   },
   {
+   "fieldname": "admin_notes",
+   "fieldtype": "Small Text",
+   "label": "Admin Notes",
+   "description": "Internal notes for admins (never shown to learners). Useful for distinguishing course clones/variants."
+  },
+  {
    "fieldname": "is_deleted",
    "fieldtype": "Check",
    "label": "Is Deleted",
@@ -344,7 +351,7 @@
   }
  ],
  "make_attachments_public": 1,
- "modified": "2026-02-19 11:41:57.038869",
+ "modified": "2026-06-08 09:30:00.000000",
  "modified_by": "sayali@frappe.io",
  "module": "LMS",
  "name": "LMS Course",
