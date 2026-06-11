@@ -1,7 +1,11 @@
+import json
+
 import frappe
 from frappe import _
 from frappe.model.naming import append_number_if_name_exists
-from frappe.utils import escape_html, random_string
+from frappe.rate_limiter import rate_limit
+from frappe.utils import escape_html, get_fullname, get_url, random_string, validate_email_address
+from frappe.utils.password import check_password
 from frappe.website.utils import cleanup_page_name, is_signup_disabled
 
 from lms.lms.utils import get_country_code, get_lms_route
@@ -89,3 +93,140 @@ def on_login(login_manager):
 	default_app = frappe.db.get_single_value("System Settings", "default_app")
 	if default_app == "lms":
 		frappe.local.response["home_page"] = get_lms_route()
+
+
+# ---------------------------------------------------------------------------
+# Self-service login-email change, verified by a confirmation link.
+#
+# In Frappe a ``User`` document's name *is* its email, so changing the login
+# email is a ``rename_doc`` — not a field edit. The rename re-syncs the
+# ``email`` field and clears every one of the user's sessions in
+# ``User.after_rename``. A learner has no rename permission, so this two-step,
+# server-mediated flow does it on their behalf:
+#
+#   1. ``request_email_change`` runs as the logged-in user, re-authenticates
+#      with their current password, validates the new address is free and
+#      well-formed, then mails a one-hour token to the **new** address.
+#   2. ``confirm_email_change`` is opened from that emailed link (possibly in a
+#      fresh browser, hence ``allow_guest``). Possession of the token proves the
+#      user controls the new mailbox, so the rename runs with
+#      ``ignore_permissions``.
+#
+# The pending change lives only in Redis (token -> {user, new_email}) with a
+# TTL, so an abandoned request simply expires and nothing is written until
+# confirmed.
+# ---------------------------------------------------------------------------
+
+# Redis namespace + lifetime for a pending email-change token.
+EMAIL_CHANGE_TOKEN_PREFIX = "lms_email_change"
+EMAIL_CHANGE_TOKEN_TTL_SECONDS = 60 * 60  # 1 hour
+
+
+def _email_change_cache_key(token: str) -> str:
+	return f"{EMAIL_CHANGE_TOKEN_PREFIX}:{token}"
+
+
+@frappe.whitelist(methods=["POST"])
+@rate_limit(limit=10, seconds=60 * 60)
+def request_email_change(new_email: str, current_password: str):
+	"""Start a login-email change for the logged-in user.
+
+	Re-authenticates with ``current_password``, validates ``new_email`` is a
+	free, well-formed address, then mails a confirmation link to it. Returns the
+	destination so the UI can tell the user where to look.
+	"""
+	user = frappe.session.user
+	if not user or user == "Guest":
+		frappe.throw(_("You must be signed in to change your email."), frappe.PermissionError)
+
+	new_email = (new_email or "").strip().lower()
+	if not new_email:
+		frappe.throw(_("Enter a new email address."))
+
+	# Raises on a malformed address.
+	validate_email_address(new_email, throw=True)
+
+	# Re-authenticate. ``check_password`` raises AuthenticationError on mismatch
+	# or when the account has no password set (e.g. SSO-only users).
+	try:
+		check_password(user, current_password or "")
+	except frappe.AuthenticationError:
+		frappe.throw(_("Your current password is incorrect."), frappe.AuthenticationError)
+
+	if new_email == user.lower():
+		frappe.throw(_("That's already your email address."))
+
+	if frappe.db.exists("User", new_email):
+		frappe.throw(_("That email address is already in use."))
+
+	token = frappe.generate_hash(length=48)
+	frappe.cache().set_value(
+		_email_change_cache_key(token),
+		json.dumps({"user": user, "new_email": new_email}),
+		expires_in_sec=EMAIL_CHANGE_TOKEN_TTL_SECONDS,
+	)
+
+	_send_email_change_confirmation(new_email, user, get_url(f"/confirm-email-change?token={token}"))
+
+	return {"sent_to": new_email}
+
+
+def _send_email_change_confirmation(new_email: str, user: str, link: str):
+	full_name = get_fullname(user) or "there"
+	frappe.sendmail(
+		recipients=[new_email],
+		subject=_("Confirm your new email address"),
+		message=_(
+			"<p>Hi {0},</p>"
+			"<p>A request was made to change the login email on your Matchbox "
+			"account to <strong>{1}</strong>.</p>"
+			"<p>Confirm it with the button below. The link expires in one hour. "
+			"If you didn't request this you can ignore this email — your account "
+			"won't change.</p>"
+			'<p style="margin:24px 0"><a href="{2}" '
+			'style="background:#002B50;color:#fff;padding:10px 18px;'
+			'border-radius:8px;text-decoration:none;display:inline-block">'
+			"Confirm email change</a></p>"
+			'<p style="color:#64748b;font-size:13px">Or paste this link into '
+			"your browser:<br>{2}</p>"
+		).format(full_name, new_email, link),
+		now=True,
+	)
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+@rate_limit(limit=20, seconds=60 * 60)
+def confirm_email_change(token: str):
+	"""Finish a pending email change from the emailed confirmation link.
+
+	Guest-allowed because the link may be opened in a browser with no session.
+	Ownership of the new address is proven by possession of the token, which was
+	mailed only to that address.
+	"""
+	token = (token or "").strip()
+	raw = frappe.cache().get_value(_email_change_cache_key(token)) if token else None
+	if not raw:
+		frappe.throw(
+			_("This confirmation link is invalid or has expired."),
+			frappe.DoesNotExistError,
+		)
+
+	data = json.loads(raw)
+	old_email = data["user"]
+	new_email = data["new_email"]
+
+	# Burn the token before renaming so a double-click can't replay.
+	frappe.cache().delete_value(_email_change_cache_key(token))
+
+	if not frappe.db.exists("User", old_email):
+		frappe.throw(_("This account no longer exists."), frappe.DoesNotExistError)
+
+	if frappe.db.exists("User", new_email):
+		frappe.throw(_("That email address is now in use. Please try a different one."))
+
+	# The rename IS the email change: User.after_rename re-syncs the `email`
+	# field and clears all of the user's sessions.
+	frappe.rename_doc("User", old_email, new_email, ignore_permissions=True)
+	frappe.db.commit()
+
+	return {"email": new_email}
