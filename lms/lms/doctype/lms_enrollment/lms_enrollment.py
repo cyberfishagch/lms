@@ -7,7 +7,7 @@ import frappe
 from frappe import _
 from frappe.email.doctype.email_template.email_template import get_email_template
 from frappe.model.document import Document
-from frappe.utils import ceil
+from frappe.utils import ceil, get_url
 
 
 class LMSEnrollment(Document):
@@ -197,6 +197,7 @@ def send_course_enrollment_mail(doc):
 		"course_title": course.title,
 		"course_name": course.name,
 		"contact_email": contact_email,
+		"login_url": get_url("/login"),
 	}
 
 	if custom_template:
@@ -210,7 +211,6 @@ def send_course_enrollment_mail(doc):
 		template=template if not custom_template else None,
 		content=content if custom_template else None,
 		args=args,
-		header=[_(course.title), "green"],
 		retry=3,
 		now=True,
 	)
