@@ -22,7 +22,8 @@
   "section_break_8",
   "column_break_12",
   "member_type",
-  "role"
+  "role",
+  "confirmation_email_sent"
  ],
  "fields": [
   {
@@ -136,12 +137,19 @@
    "fieldtype": "Link",
    "label": "Enrollment from Batch",
    "options": "LMS Batch"
+  },
+  {
+   "default": "0",
+   "fieldname": "confirmation_email_sent",
+   "fieldtype": "Check",
+   "label": "Confirmation Email Sent",
+   "read_only": 1
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-01-28 18:07:58.529033",
+ "modified": "2026-07-16 10:10:43.347375",
  "modified_by": "sayali@frappe.io",
  "module": "LMS",
  "name": "LMS Enrollment",
