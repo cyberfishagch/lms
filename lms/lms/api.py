@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import xml.etree.ElementTree as ET
 import zipfile
 from datetime import timedelta
@@ -3326,3 +3327,35 @@ def clone_chapter_into_course(source_chapter: str, target_course: str) -> dict:
 	except Exception:
 		frappe.db.rollback()
 		raise
+
+
+@frappe.whitelist(allow_guest=True)
+def get_lms_version():
+	"""Return the running LMS backend version info.
+
+	Useful for matching a deployed backend image against the frontend
+	build. The commit is read from the LMS app git checkout in the image.
+	"""
+	app_path = frappe.get_app_path("lms")
+	try:
+		commit = subprocess.check_output(
+			["git", "rev-parse", "HEAD"],
+			cwd=app_path,
+			stderr=subprocess.DEVNULL,
+			text=True,
+		).strip()
+		branch = subprocess.check_output(
+			["git", "rev-parse", "--abbrev-ref", "HEAD"],
+			cwd=app_path,
+			stderr=subprocess.DEVNULL,
+			text=True,
+		).strip()
+	except Exception:
+		commit = "unknown"
+		branch = "unknown"
+
+	return {
+		"commit": commit,
+		"branch": branch,
+		"short": commit[:8] if commit != "unknown" else commit,
+	}
