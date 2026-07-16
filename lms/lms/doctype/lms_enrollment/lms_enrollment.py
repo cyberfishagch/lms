@@ -212,4 +212,5 @@ def send_course_enrollment_mail(doc):
 		args=args,
 		header=[_(course.title), "green"],
 		retry=3,
+		now=True,
 	)
