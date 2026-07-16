@@ -66,6 +66,7 @@
   "email_templates_tab",
   "certification_template",
   "batch_confirmation_template",
+  "course_enrollment_template",
   "column_break_uwsp",
   "payment_reminder_template",
   "seo_tab",
@@ -194,6 +195,12 @@
    "fieldname": "batch_confirmation_template",
    "fieldtype": "Link",
    "label": "Batch Confirmation Template",
+   "options": "Email Template"
+  },
+  {
+   "fieldname": "course_enrollment_template",
+   "fieldtype": "Link",
+   "label": "Course Enrollment Template",
    "options": "Email Template"
   },
   {
@@ -490,7 +497,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-02-19 16:28:15.310145",
+ "modified": "2026-07-16 10:10:43.347375",
  "modified_by": "sayali@frappe.io",
  "module": "LMS",
  "name": "LMS Settings",
