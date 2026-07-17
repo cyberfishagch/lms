@@ -198,6 +198,7 @@ def send_course_enrollment_mail(doc):
 		"course_name": course.name,
 		"contact_email": contact_email,
 		"login_url": get_url(),
+		"course_url": get_url(f"/course/{course.name}"),
 	}
 
 	if custom_template:

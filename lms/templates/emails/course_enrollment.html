@@ -2,12 +2,17 @@
 <p>
     {{ _("You have been enrolled in") }} <strong>{{ course_title }}</strong>.
 </p>
-<p>{{ _("Log in to Matchbox to access your training.") }}</p>
+<p>{{ _("You can access the course by logging in to Matchbox using the link below:") }}</p>
+<p>
+    <a href="{{ login_url }}" rel="nofollow">{{ _("Log in to Matchbox") }}</a>
+</p>
 <p style="margin: 20px 0;">
-    <a href="{{ login_url }}" rel="nofollow" class="btn btn-primary">
-        {{ _("Log in to Matchbox") }}
+    <a href="{{ course_url }}" rel="nofollow" class="btn btn-primary">
+        {{ _("Open Course") }}
     </a>
 </p>
+
+<p>{{ _("We hope you enjoy the training and wish you a great learning experience!") }}</p>
 
 {% if contact_email %}
 <p>
