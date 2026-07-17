@@ -2,6 +2,7 @@
 # For license information, please see license.txt
 
 import json
+from urllib.parse import urlencode
 
 import frappe
 from frappe import _
@@ -198,7 +199,7 @@ def send_course_enrollment_mail(doc):
 		"course_name": course.name,
 		"contact_email": contact_email,
 		"login_url": get_url(),
-		"course_url": get_url(f"/course/{course.name}"),
+		"course_url": get_url(f"/?{urlencode({'course': course.name})}"),
 	}
 
 	if custom_template:
