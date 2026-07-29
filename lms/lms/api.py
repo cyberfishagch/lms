@@ -224,7 +224,17 @@ def get_job_opportunities(filters: dict = None, orFilters: dict = None):
 @frappe.whitelist(allow_guest=True)
 def get_chart_details():
 	details = frappe._dict()
-	details.enrollments = frappe.db.count("LMS Enrollment")
+	Enrollment = frappe.qb.DocType("LMS Enrollment")
+	Course = frappe.qb.DocType("LMS Course")
+	enrollments = (
+		frappe.qb.from_(Enrollment)
+		.join(Course)
+		.on(Enrollment.course == Course.name)
+		.select(Enrollment.progress)
+		.where(Course.is_deleted == 0)
+		.run(as_dict=True)
+	)
+	details.enrollments = len(enrollments)
 	details.courses = frappe.db.count(
 		"LMS Course",
 		{
@@ -234,7 +244,7 @@ def get_chart_details():
 		},
 	)
 	details.users = frappe.db.count("User", {"enabled": 1, "name": ["not in", ("Administrator", "Guest")]})
-	details.completions = frappe.db.count("LMS Enrollment", {"progress": ["like", "%100%"]})
+	details.completions = sum(flt(enrollment.progress) == 100 for enrollment in enrollments)
 	details.certifications = frappe.db.count("LMS Certificate", {"published": 1})
 	return details
 
