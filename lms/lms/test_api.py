@@ -1,6 +1,11 @@
 import frappe
 
-from lms.lms.api import get_certified_participants, get_course_assessment_progress
+from lms.lms.api import (
+	delete_course,
+	get_certified_participants,
+	get_chart_details,
+	get_course_assessment_progress,
+)
 from lms.lms.test_helpers import BaseTestUtils
 
 
@@ -61,3 +66,19 @@ class TestLMSAPI(BaseTestUtils):
 			self.assertEqual(exercise.exercise, self.programming_exercise.name)
 			self.assertEqual(exercise.exercise_title, self.programming_exercise.title)
 			self.assertEqual(exercise.status, "Passed")
+
+	def test_chart_details_excludes_archived_course_enrollments(self):
+		baseline = get_chart_details()
+		course = self._create_course(f"Archived Metrics {frappe.generate_hash()}")
+		enrollment = self._create_enrollment(self.student1.email, course.name)
+		frappe.db.set_value("LMS Enrollment", enrollment.name, "progress", 100)
+
+		with_active_course = get_chart_details()
+		self.assertEqual(with_active_course.enrollments, baseline.enrollments + 1)
+		self.assertEqual(with_active_course.completions, baseline.completions + 1)
+
+		delete_course(course.name)
+
+		with_archived_course = get_chart_details()
+		self.assertEqual(with_archived_course.enrollments, baseline.enrollments)
+		self.assertEqual(with_archived_course.completions, baseline.completions)
