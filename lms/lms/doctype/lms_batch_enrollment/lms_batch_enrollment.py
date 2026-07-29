@@ -161,5 +161,7 @@ def send_mail(doc):
 		content=content if custom_template else None,
 		args=args,
 		header=[_(batch.title), "green"],
+		reference_doctype=doc.doctype,
+		reference_name=doc.name,
 		retry=3,
 	)
