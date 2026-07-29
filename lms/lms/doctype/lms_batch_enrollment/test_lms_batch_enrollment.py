@@ -27,21 +27,34 @@ class UnitTestLMSBatchEnrollment(UnitTestCase):
 		batch = frappe._dict(
 			name="test-batch",
 			title="Test Batch",
+			end_date="2026-08-10",
 			start_date=None,
 			start_time=None,
 			medium=None,
 			confirmation_email_template=None,
 		)
+		courses = [frappe._dict(course="test-course", title="Test Course")]
 
 		with (
 			patch.object(frappe.db, "get_value", return_value=batch),
 			patch.object(frappe.db, "get_single_value", return_value=None),
+			patch.object(frappe, "get_all", return_value=courses),
+			patch(
+				"lms.lms.doctype.lms_batch_enrollment.lms_batch_enrollment.get_url",
+				return_value="https://matchbox.training",
+			),
 			patch.object(frappe, "sendmail") as sendmail,
 		):
 			send_mail(enrollment)
 
-		self.assertEqual(sendmail.call_args.kwargs["reference_doctype"], enrollment.doctype)
-		self.assertEqual(sendmail.call_args.kwargs["reference_name"], enrollment.name)
+		mail = sendmail.call_args.kwargs
+		self.assertEqual(mail["subject"], "Training Assignment: Test Course")
+		self.assertEqual(mail["template"], "batch_confirmation")
+		self.assertEqual(mail["args"]["course_titles"], ["Test Course"])
+		self.assertEqual(mail["args"]["end_date"], "2026-08-10")
+		self.assertEqual(mail["args"]["login_url"], "https://matchbox.training")
+		self.assertEqual(mail["reference_doctype"], enrollment.doctype)
+		self.assertEqual(mail["reference_name"], enrollment.name)
 
 
 class IntegrationTestLMSBatchEnrollment(IntegrationTestCase):

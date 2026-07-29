@@ -7,6 +7,7 @@ import frappe
 from frappe import _
 from frappe.email.doctype.email_template.email_template import get_email_template
 from frappe.model.document import Document
+from frappe.utils import get_url
 
 
 class LMSBatchEnrollment(Document):
@@ -126,6 +127,7 @@ def send_mail(doc):
 		[
 			"name",
 			"title",
+			"end_date",
 			"start_date",
 			"start_time",
 			"medium",
@@ -134,7 +136,18 @@ def send_mail(doc):
 		as_dict=1,
 	)
 
-	subject = _("Enrollment Confirmation for {0}").format(batch.title)
+	courses = frappe.get_all(
+		"Batch Course",
+		filters={"parent": batch.name},
+		fields=["course", "title"],
+		order_by="idx",
+	)
+	course_titles = [course.title for course in courses]
+
+	subject = _("Matchbox Training Assignment")
+	if len(course_titles) == 1:
+		subject = _("Training Assignment: {0}").format(course_titles[0])
+
 	template = "batch_confirmation"
 	custom_template = batch.confirmation_email_template or frappe.db.get_single_value(
 		"LMS Settings", "batch_confirmation_template"
@@ -143,6 +156,9 @@ def send_mail(doc):
 	args = {
 		"title": batch.title,
 		"student_name": doc.member_name,
+		"course_titles": course_titles,
+		"end_date": batch.end_date,
+		"login_url": get_url(),
 		"start_time": batch.start_time,
 		"start_date": batch.start_date,
 		"medium": batch.medium,
@@ -160,7 +176,6 @@ def send_mail(doc):
 		template=template if not custom_template else None,
 		content=content if custom_template else None,
 		args=args,
-		header=[_(batch.title), "green"],
 		reference_doctype=doc.doctype,
 		reference_name=doc.name,
 		retry=3,
