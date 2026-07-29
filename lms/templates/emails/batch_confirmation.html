@@ -1,34 +1,42 @@
 <p>
-    {{ _("Dear ") }} {{ student_name }},
-</p>
-<br>
-<p>
-    {{ _("We are pleased to inform you that you have been enrolled in our upcoming batch. Congratulations!") }}
-</p>
-<br>
-
-<p>
-    <b>{{ _("Batch Start Date:") }}</b> {{ frappe.utils.format_date(start_date, "medium") }}
+    {{ _("Hello") }} {{ student_name }},
 </p>
 
-{% if medium %}
+{% if course_titles | length == 1 %}
 <p>
-    <b>{{ _("Medium:") }}</b> {{ medium }}
+    {{ _("You have been enrolled in") }} <strong>{{ course_titles[0] }}</strong>.
 </p>
+{% else %}
+<p>
+    {{ _("You have been enrolled in the following training courses:") }}
+</p>
+<ul>
+    {% for course_title in course_titles %}
+    <li>{{ course_title }}</li>
+    {% endfor %}
+</ul>
 {% endif %}
 
+{% if course_titles | length == 1 %}
+<p>{{ _("You can access the course by logging in to Matchbox using the link below:") }}</p>
+{% else %}
+<p>{{ _("You can access the courses by logging in to Matchbox using the link below:") }}</p>
+{% endif %}
 <p>
-    <b>{{ _("Timings:") }}</b> {{ frappe.utils.format_time(start_time, "hh:mm a") }}
+    <a href="{{ login_url }}" rel="nofollow">{{ _("Log in to Matchbox") }}</a>
 </p>
-<br>
+
+{% if end_date %}
+{% if course_titles | length == 1 %}
+<p>{{ _("Please complete this training by") }} <strong>{{ frappe.utils.format_date(end_date, "dd MMMM yyyy") }}</strong>.</p>
+{% else %}
+<p>{{ _("Please complete these trainings by") }} <strong>{{ frappe.utils.format_date(end_date, "dd MMMM yyyy") }}</strong>.</p>
+{% endif %}
+{% endif %}
+
+<p>{{ _("We hope you enjoy the training and wish you a great learning experience!") }}</p>
+
 <p>
-    {{ _("Visit the following link to view your ") }}
-    <a href="{{ get_lms_route('batches/' ~ name) }}">{{ _("Batch Details") }}</a>
-</p>
-<p>
-    {{ _("If you have any questions or require assistance, feel free to contact us.") }}
-</p>
-<br>
-<p>
-    {{ _("Best Regards") }}
+    {{ _("Best regards,") }}<br>
+    {{ _("The Matchbox Training Team") }}
 </p>
