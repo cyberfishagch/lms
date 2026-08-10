@@ -1,21 +1,22 @@
+<p>{{ _("Hello") }} {{ student_name }},</p>
+
 <p>
-    {{ _("Dear ") }} {{ student_name }},
+    {{ _("Congratulations on completing") }} <strong>{{ course_title }}</strong>.
 </p>
-<br>
+
 <p>
-    {{ _("I am delighted to inform you that you have successfully earned your certification for the {0} course. Congratulations!").format(frappe.bold(course_title)) }}
+    {{ _("Your certificate is now available in Matchbox. You can view or download it using the link below:") }}
 </p>
-<br>
-<p>
-    {{ _("With this certification, you can now showcase your updated skills and share your achievement with your colleagues and on LinkedIn. To access your certificate, please click on the link provided below. Make sure you are logged in to the portal.") }}
+
+<p style="margin: 20px 0;">
+    <a href="/api/method/frappe.utils.print_format.download_pdf?doctype=LMS+Certificate&name={{certificate_name}}&format={{template | urlencode }}" class="btn btn-primary">
+        {{ _("View certificate") }}
+    </a>
 </p>
-<br>
-<a href="/api/method/frappe.utils.print_format.download_pdf?doctype=LMS+Certificate&name={{certificate_name}}&format={{template | urlencode }}">{{ _("Certificate Link") }}</a>
-<br>
+
+<p>{{ _("You can also find it anytime under My Certificates.") }}</p>
+
 <p>
-    {{ _("Once again, congratulations on this significant accomplishment.")}}
-</p>
-<br>
-<p>
-    {{ _("Best Regards") }}
+    {{ _("Best regards,") }}<br>
+    {{ _("The Matchbox Training Team") }}
 </p>

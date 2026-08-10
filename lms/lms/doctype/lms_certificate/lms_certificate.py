@@ -30,7 +30,7 @@ class LMSCertificate(Document):
 			self.send_mail()
 
 	def send_mail(self):
-		subject = _("Congratulations on getting certified!")
+		subject = _("Congratulations — your certificate is ready")
 		template = "certification"
 		custom_template = frappe.db.get_single_value("LMS Settings", "certification_template")
 
