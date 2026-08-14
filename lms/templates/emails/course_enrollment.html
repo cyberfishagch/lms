@@ -2,6 +2,9 @@
 <p>
     {{ _("You have been enrolled in") }} <strong>{{ course_title }}</strong>.
 </p>
+{% if password_setup_url %}
+{% include "lms/templates/emails/student_password_setup.html" %}
+{% else %}
 <p>{{ _("You can access the course by logging in to Matchbox using the link below:") }}</p>
 <p>
     <a href="{{ login_url }}" rel="nofollow">{{ _("Log in to Matchbox") }}</a>
@@ -11,6 +14,7 @@
         {{ _("Open Course") }}
     </a>
 </p>
+{% endif %}
 
 <p>{{ _("We hope you enjoy the training and wish you a great learning experience!") }}</p>
 

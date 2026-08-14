@@ -10,6 +10,12 @@ from frappe.email.doctype.email_template.email_template import get_email_templat
 from frappe.model.document import Document
 from frappe.utils import ceil, get_url
 
+from lms.lms.student_invitation import (
+	append_student_password_setup,
+	get_student_password_setup_url,
+	mark_student_welcome_sent,
+)
+
 
 class LMSEnrollment(Document):
 	def before_insert(self):
@@ -172,9 +178,7 @@ def send_course_enrollment_email(doc: Document):
 				# Don't fail the enrollment if only the notification email couldn't
 				# be queued. The flag stays unset so admins can retry manually.
 				frappe.log_error(
-					_("Failed to send course enrollment confirmation email for {0}").format(
-						doc.name
-					),
+					_("Failed to send course enrollment confirmation email for {0}").format(doc.name),
 					"Course Enrollment Email",
 				)
 
@@ -192,6 +196,7 @@ def send_course_enrollment_mail(doc):
 	custom_template = frappe.db.get_single_value("LMS Settings", "course_enrollment_template")
 
 	contact_email = frappe.db.get_single_value("LMS Settings", "contact_us_email")
+	password_setup_url = get_student_password_setup_url(doc.member)
 
 	args = {
 		"student_name": doc.member_name,
@@ -200,12 +205,14 @@ def send_course_enrollment_mail(doc):
 		"contact_email": contact_email,
 		"login_url": get_url(),
 		"course_url": get_url(f"/?{urlencode({'course': course.name})}"),
+		"password_setup_url": password_setup_url,
 	}
 
 	if custom_template:
 		email_template = get_email_template(custom_template, args)
 		subject = email_template.get("subject")
 		content = email_template.get("message")
+		content = append_student_password_setup(content, password_setup_url)
 
 	frappe.sendmail(
 		recipients=doc.member,
@@ -216,3 +223,6 @@ def send_course_enrollment_mail(doc):
 		retry=3,
 		now=True,
 	)
+
+	if password_setup_url:
+		mark_student_welcome_sent(doc.member)

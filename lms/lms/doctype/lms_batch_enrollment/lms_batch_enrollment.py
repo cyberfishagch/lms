@@ -9,6 +9,12 @@ from frappe.email.doctype.email_template.email_template import get_email_templat
 from frappe.model.document import Document
 from frappe.utils import get_url
 
+from lms.lms.student_invitation import (
+	append_student_password_setup,
+	get_student_password_setup_url,
+	mark_student_welcome_sent,
+)
+
 
 class LMSBatchEnrollment(Document):
 	def after_insert(self):
@@ -152,6 +158,7 @@ def send_mail(doc):
 	custom_template = batch.confirmation_email_template or frappe.db.get_single_value(
 		"LMS Settings", "batch_confirmation_template"
 	)
+	password_setup_url = get_student_password_setup_url(doc.member)
 
 	args = {
 		"title": batch.title,
@@ -163,12 +170,14 @@ def send_mail(doc):
 		"start_date": batch.start_date,
 		"medium": batch.medium,
 		"name": batch.name,
+		"password_setup_url": password_setup_url,
 	}
 
 	if custom_template:
 		email_template = get_email_template(custom_template, args)
 		subject = email_template.get("subject")
 		content = email_template.get("message")
+		content = append_student_password_setup(content, password_setup_url)
 
 	frappe.sendmail(
 		recipients=doc.member,
@@ -180,3 +189,6 @@ def send_mail(doc):
 		reference_name=doc.name,
 		retry=3,
 	)
+
+	if password_setup_url:
+		mark_student_welcome_sent(doc.member)
