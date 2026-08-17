@@ -6,7 +6,10 @@ from unittest.mock import patch
 import frappe
 from frappe.tests import IntegrationTestCase, UnitTestCase
 
-from lms.lms.doctype.lms_batch_enrollment.lms_batch_enrollment import send_mail
+from lms.lms.doctype.lms_batch_enrollment.lms_batch_enrollment import (
+	send_confirmation_email,
+	send_mail,
+)
 
 # On IntegrationTestCase, the doctype test records and all
 # link-field test record dependencies are recursively loaded
@@ -107,6 +110,27 @@ class UnitTestLMSBatchEnrollment(UnitTestCase):
 		self.assertEqual(mail["args"]["course_titles"], [])
 		self.assertEqual(mail["args"]["password_setup_url"], setup_url)
 		mark_sent.assert_called_once_with(enrollment.member)
+
+	def test_confirmation_email_failure_keeps_batch_retryable(self):
+		enrollment = frappe._dict(
+			doctype="LMS Batch Enrollment",
+			name="test-batch-enrollment",
+			confirmation_email_sent=0,
+		)
+
+		with (
+			patch.object(frappe, "get_cached_value", return_value="outgoing"),
+			patch(
+				"lms.lms.doctype.lms_batch_enrollment.lms_batch_enrollment.send_mail",
+				side_effect=RuntimeError("queue failed"),
+			),
+			patch.object(frappe, "log_error") as log_error,
+			patch.object(frappe.db, "set_value") as set_value,
+		):
+			send_confirmation_email(enrollment)
+
+		set_value.assert_not_called()
+		log_error.assert_called_once()
 
 
 class IntegrationTestLMSBatchEnrollment(IntegrationTestCase):

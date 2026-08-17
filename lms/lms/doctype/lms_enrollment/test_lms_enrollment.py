@@ -82,15 +82,25 @@ class UnitTestLMSEnrollment(UnitTestCase):
 		user.send_welcome_email = 1
 		with (
 			patch.object(frappe.db, "exists", return_value=True),
-			patch.object(frappe, "get_doc", return_value=user),
+			patch.object(frappe, "get_doc", return_value=user) as get_doc,
 		):
 			self.assertIsNone(get_student_password_setup_url("learner@example.com"))
+			get_doc.assert_called_once_with("User", "learner@example.com", for_update=True)
 			user.reset_password.assert_not_called()
 
 		user.send_welcome_email = 0
 		with (
 			patch.object(frappe.db, "exists", return_value=True),
 			patch.object(frappe, "get_doc", return_value=user),
+			patch("lms.lms.student_invitation._user_has_password", return_value=True),
+		):
+			self.assertIsNone(get_student_password_setup_url("learner@example.com"))
+			user.reset_password.assert_not_called()
+
+		with (
+			patch.object(frappe.db, "exists", return_value=True),
+			patch.object(frappe, "get_doc", return_value=user),
+			patch("lms.lms.student_invitation._user_has_password", return_value=False),
 		):
 			self.assertEqual(
 				get_student_password_setup_url("learner@example.com"),

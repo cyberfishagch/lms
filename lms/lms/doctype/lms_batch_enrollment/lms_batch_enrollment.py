@@ -122,8 +122,16 @@ def send_confirmation_email(doc: Document):
 			"Email Account", {"default_outgoing": 1, "enable_outgoing": 1}, "name"
 		)
 		if not doc.confirmation_email_sent and (outgoing_email_account or frappe.conf.get("mail_login")):
-			send_mail(doc)
-			frappe.db.set_value(doc.doctype, doc.name, "confirmation_email_sent", 1)
+			try:
+				send_mail(doc)
+				frappe.db.set_value(doc.doctype, doc.name, "confirmation_email_sent", 1)
+			except Exception:
+				# Keep the enrollment and both notification flags retryable when
+				# the assignment email could not be queued.
+				frappe.log_error(
+					_("Failed to send batch enrollment confirmation email for {0}").format(doc.name),
+					"Batch Enrollment Email",
+				)
 
 
 def send_mail(doc):
