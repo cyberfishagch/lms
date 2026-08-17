@@ -1,7 +1,6 @@
 # Copyright (c) 2021, FOSS United and contributors
 # For license information, please see license.txt
 
-import json
 from urllib.parse import urlencode
 
 import frappe
@@ -12,9 +11,9 @@ from frappe.utils import ceil, get_url
 
 from lms.lms.student_invitation import (
 	append_student_password_setup,
-	ensure_password_setup_email_sent,
 	get_student_password_setup_url,
-	mark_student_welcome_sent,
+	send_student_password_setup_email,
+	student_invitation_lock,
 )
 
 
@@ -35,7 +34,7 @@ class LMSEnrollment(Document):
 		for enrollments created automatically from a batch (the batch already
 		sends its own confirmation).
 		"""
-		send_course_enrollment_email(self)
+		_send_course_enrollment_email(self)
 
 	def validate_owner(self):
 		"""Makes the member as the owner of the document so that users can update their progress"""
@@ -152,36 +151,44 @@ def get_permission_query_conditions(user):
 	)
 
 
-@frappe.whitelist()
-def send_course_enrollment_email(doc: Document):
-	"""Whitelisted helper to (re-)send the course enrollment confirmation email.
+@frappe.whitelist(methods=["POST"])
+def send_course_enrollment_email(name: str):
+	"""Re-send a course enrollment email after checking document permission."""
+	doc = frappe.get_doc("LMS Enrollment", name)
+	doc.check_permission("write")
+	_send_course_enrollment_email(doc)
 
-	Accepts either an LMSEnrollment document or a JSON string so it can be
-	called from the desk or from code paths that only have the raw values.
-	"""
-	if isinstance(doc, str):
-		doc = frappe._dict(json.loads(doc))
 
+def _send_course_enrollment_email(doc: Document):
 	# Batch enrollments cascade into LMS Enrollment docs, but the batch already
 	# sends its own confirmation email. Avoid duplicate/noisy course emails.
 	if doc.get("enrollment_from_batch"):
 		return
 
-	if not doc.get("confirmation_email_sent"):
-		outgoing_email_account = frappe.get_cached_value(
-			"Email Account", {"default_outgoing": 1, "enable_outgoing": 1}, "name"
-		)
-		if outgoing_email_account or frappe.conf.get("mail_login"):
-			try:
-				send_course_enrollment_mail(doc)
+	try:
+		with student_invitation_lock(doc.member):
+			# Re-read inside the cross-commit lock. Another request may have completed
+			# while this one waited for the student's first setup email.
+			if frappe.db.get_value("LMS Enrollment", doc.name, "confirmation_email_sent"):
+				return
+
+			outgoing_email_account = frappe.get_cached_value(
+				"Email Account", {"default_outgoing": 1, "enable_outgoing": 1}, "name"
+			)
+			if outgoing_email_account or frappe.conf.get("mail_login"):
+				password_setup_sent = send_course_enrollment_mail(doc)
 				frappe.db.set_value("LMS Enrollment", doc.name, "confirmation_email_sent", 1)
-			except Exception:
-				# Don't fail the enrollment if only the notification email couldn't
-				# be queued. The flag stays unset so admins can retry manually.
-				frappe.log_error(
-					_("Failed to send course enrollment confirmation email for {0}").format(doc.name),
-					"Course Enrollment Email",
-				)
+				if password_setup_sent:
+					# EmailQueue.send has already committed the enrollment. Commit the
+					# matching notification flags and queue redaction before returning.
+					frappe.db.commit()
+	except Exception:
+		# Don't fail the enrollment if only the notification email couldn't
+		# be queued. The flag stays unset so admins can retry manually.
+		frappe.log_error(
+			_("Failed to send course enrollment confirmation email for {0}").format(doc.name),
+			"Course Enrollment Email",
+		)
 
 
 def send_course_enrollment_mail(doc):
@@ -215,16 +222,19 @@ def send_course_enrollment_mail(doc):
 		content = email_template.get("message")
 		content = append_student_password_setup(content, password_setup_url)
 
-	email_queue = frappe.sendmail(
-		recipients=doc.member,
-		subject=subject,
-		template=template if not custom_template else None,
-		content=content if custom_template else None,
-		args=args,
-		retry=3,
-		now=True,
-	)
-	ensure_password_setup_email_sent(email_queue, password_setup_url)
-
+	email_args = {
+		"recipients": doc.member,
+		"subject": subject,
+		"template": template if not custom_template else None,
+		"content": content if custom_template else None,
+		"args": args,
+		"retry": 3,
+	}
 	if password_setup_url:
-		mark_student_welcome_sent(doc.member)
+		return send_student_password_setup_email(doc.member, password_setup_url, **email_args)
+
+	frappe.sendmail(
+		now=True,
+		**email_args,
+	)
+	return False
