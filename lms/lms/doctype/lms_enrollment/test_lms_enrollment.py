@@ -143,7 +143,7 @@ class TestLMSEnrollment(TestCase):
 			self.assertFalse(send_course_enrollment_mail(enrollment))
 
 		self.assertIsNone(sendmail.call_args.kwargs["args"]["password_setup_url"])
-		self.assertTrue(sendmail.call_args.kwargs["now"])
+		self.assertFalse(sendmail.call_args.kwargs["now"])
 		send_setup.assert_not_called()
 
 	def test_password_setup_delivery_uses_retained_queue(self):

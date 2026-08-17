@@ -234,7 +234,7 @@ def send_course_enrollment_mail(doc):
 		return send_student_password_setup_email(doc.member, password_setup_url, **email_args)
 
 	frappe.sendmail(
-		now=True,
+		now=False,
 		**email_args,
 	)
 	return False
