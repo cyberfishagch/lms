@@ -4,10 +4,14 @@
 from unittest.mock import Mock, patch
 
 import frappe
+from frappe.core.doctype.user.user import User
 from frappe.tests import UnitTestCase
 
 from lms.lms.doctype.lms_enrollment.lms_enrollment import send_course_enrollment_mail
-from lms.lms.student_invitation import get_student_password_setup_url
+from lms.lms.student_invitation import (
+	ensure_password_setup_email_sent,
+	get_student_password_setup_url,
+)
 
 
 class UnitTestLMSEnrollment(UnitTestCase):
@@ -21,7 +25,7 @@ class UnitTestLMSEnrollment(UnitTestCase):
 		setup_url = "https://matchbox.training/update-password?key=test"
 
 		with (
-			patch.object(frappe.db, "get_value", return_value=course),
+			patch.object(frappe.db, "get_value", side_effect=[course, "Sent"]),
 			patch.object(frappe.db, "get_single_value", return_value=None),
 			patch(
 				"lms.lms.doctype.lms_enrollment.lms_enrollment.get_student_password_setup_url",
@@ -32,7 +36,7 @@ class UnitTestLMSEnrollment(UnitTestCase):
 				return_value="https://matchbox.training",
 			),
 			patch("lms.lms.doctype.lms_enrollment.lms_enrollment.mark_student_welcome_sent") as mark_sent,
-			patch.object(frappe, "sendmail") as sendmail,
+			patch.object(frappe, "sendmail", return_value=frappe._dict(name="test-email")) as sendmail,
 		):
 			send_course_enrollment_mail(enrollment)
 
@@ -40,6 +44,14 @@ class UnitTestLMSEnrollment(UnitTestCase):
 		self.assertEqual(mail["template"], "course_enrollment")
 		self.assertEqual(mail["args"]["password_setup_url"], setup_url)
 		mark_sent.assert_called_once_with(enrollment.member)
+
+	def test_password_setup_rejects_unsent_email_queue(self):
+		with patch.object(frappe.db, "get_value", return_value="Not Sent"):
+			with self.assertRaises(frappe.OutgoingEmailError):
+				ensure_password_setup_email_sent(
+					frappe._dict(name="test-email"),
+					"https://matchbox.training/update-password?key=test",
+				)
 
 	def test_later_course_assignment_does_not_repeat_password_setup(self):
 		enrollment = frappe._dict(
@@ -69,8 +81,9 @@ class UnitTestLMSEnrollment(UnitTestCase):
 		mark_sent.assert_not_called()
 
 	def test_password_setup_is_only_generated_for_deferred_students(self):
-		user = Mock(send_welcome_email=0)
-		user.reset_password.return_value = "https://matchbox.training/update-password?key=test"
+		user = Mock(spec=User)
+		user.send_welcome_email = 0
+		user._reset_password.return_value = "https://matchbox.training/update-password?key=test"
 
 		with (
 			patch.object(frappe.db, "exists", return_value=False),
@@ -86,7 +99,7 @@ class UnitTestLMSEnrollment(UnitTestCase):
 		):
 			self.assertIsNone(get_student_password_setup_url("learner@example.com"))
 			get_doc.assert_called_once_with("User", "learner@example.com", for_update=True)
-			user.reset_password.assert_not_called()
+			user._reset_password.assert_not_called()
 
 		user.send_welcome_email = 0
 		with (
@@ -95,7 +108,7 @@ class UnitTestLMSEnrollment(UnitTestCase):
 			patch("lms.lms.student_invitation._user_has_password", return_value=True),
 		):
 			self.assertIsNone(get_student_password_setup_url("learner@example.com"))
-			user.reset_password.assert_not_called()
+			user._reset_password.assert_not_called()
 
 		with (
 			patch.object(frappe.db, "exists", return_value=True),
@@ -106,4 +119,4 @@ class UnitTestLMSEnrollment(UnitTestCase):
 				get_student_password_setup_url("learner@example.com"),
 				"https://matchbox.training/update-password?key=test",
 			)
-			user.reset_password.assert_called_once_with()
+			user._reset_password.assert_called_once_with()

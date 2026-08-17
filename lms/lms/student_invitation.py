@@ -37,7 +37,17 @@ def get_student_password_setup_url(user: str) -> str | None:
 	if _user_has_password(user):
 		return None
 
-	return user_doc.reset_password()
+	return user_doc._reset_password()
+
+
+def ensure_password_setup_email_sent(email_queue, password_setup_url: str | None):
+	"""Raise when an immediate password-setup email was not sent."""
+	if not password_setup_url:
+		return
+
+	status = frappe.db.get_value("Email Queue", email_queue.name, "status") if email_queue else None
+	if status != "Sent":
+		raise frappe.OutgoingEmailError("Password setup email was not sent.")
 
 
 def append_student_password_setup(content: str, password_setup_url: str | None) -> str:

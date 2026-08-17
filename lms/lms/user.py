@@ -141,7 +141,7 @@ def _resend_expired_password_link(key: str):
 		return
 
 	user_doc.validate_reset_password()
-	user_doc.reset_password(send_email=True)
+	user_doc._reset_password(send_email=True)
 
 
 # ---------------------------------------------------------------------------

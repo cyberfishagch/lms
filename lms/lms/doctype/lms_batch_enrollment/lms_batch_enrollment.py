@@ -11,6 +11,7 @@ from frappe.utils import get_url
 
 from lms.lms.student_invitation import (
 	append_student_password_setup,
+	ensure_password_setup_email_sent,
 	get_student_password_setup_url,
 	mark_student_welcome_sent,
 )
@@ -187,7 +188,7 @@ def send_mail(doc):
 		content = email_template.get("message")
 		content = append_student_password_setup(content, password_setup_url)
 
-	frappe.sendmail(
+	email_queue = frappe.sendmail(
 		recipients=doc.member,
 		subject=subject,
 		template=template if not custom_template else None,
@@ -198,6 +199,7 @@ def send_mail(doc):
 		retry=3,
 		now=bool(password_setup_url),
 	)
+	ensure_password_setup_email_sent(email_queue, password_setup_url)
 
 	if password_setup_url:
 		mark_student_welcome_sent(doc.member)

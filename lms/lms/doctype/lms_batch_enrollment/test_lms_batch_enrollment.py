@@ -88,7 +88,7 @@ class UnitTestLMSBatchEnrollment(UnitTestCase):
 		setup_url = "https://matchbox.training/update-password?key=test"
 
 		with (
-			patch.object(frappe.db, "get_value", return_value=batch),
+			patch.object(frappe.db, "get_value", side_effect=[batch, "Sent"]),
 			patch.object(frappe.db, "get_single_value", return_value=None),
 			patch.object(frappe, "get_all", return_value=[]),
 			patch(
@@ -102,7 +102,7 @@ class UnitTestLMSBatchEnrollment(UnitTestCase):
 			patch(
 				"lms.lms.doctype.lms_batch_enrollment.lms_batch_enrollment.mark_student_welcome_sent"
 			) as mark_sent,
-			patch.object(frappe, "sendmail") as sendmail,
+			patch.object(frappe, "sendmail", return_value=frappe._dict(name="test-email")) as sendmail,
 		):
 			send_mail(enrollment)
 
