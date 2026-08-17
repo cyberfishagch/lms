@@ -65,6 +65,7 @@ class UnitTestLMSBatchEnrollment(UnitTestCase):
 		self.assertEqual(mail["args"]["login_url"], "https://matchbox.training")
 		self.assertEqual(mail["reference_doctype"], enrollment.doctype)
 		self.assertEqual(mail["reference_name"], enrollment.name)
+		self.assertFalse(mail["now"])
 		mark_sent.assert_not_called()
 
 	def test_empty_batch_assignment_includes_deferred_password_setup(self):
@@ -109,6 +110,7 @@ class UnitTestLMSBatchEnrollment(UnitTestCase):
 		self.assertEqual(mail["subject"], "Matchbox Training Assignment")
 		self.assertEqual(mail["args"]["course_titles"], [])
 		self.assertEqual(mail["args"]["password_setup_url"], setup_url)
+		self.assertTrue(mail["now"])
 		mark_sent.assert_called_once_with(enrollment.member)
 
 	def test_confirmation_email_failure_keeps_batch_retryable(self):

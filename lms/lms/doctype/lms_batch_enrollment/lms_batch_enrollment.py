@@ -196,6 +196,7 @@ def send_mail(doc):
 		reference_doctype=doc.doctype,
 		reference_name=doc.name,
 		retry=3,
+		now=bool(password_setup_url),
 	)
 
 	if password_setup_url:
