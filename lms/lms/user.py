@@ -1,11 +1,21 @@
 import json
+from datetime import timedelta
 
 import frappe
 from frappe import _
 from frappe.model.naming import append_number_if_name_exists
 from frappe.rate_limiter import rate_limit
-from frappe.utils import escape_html, get_fullname, get_url, random_string, validate_email_address
-from frappe.utils.password import check_password
+from frappe.utils import (
+	cint,
+	escape_html,
+	get_fullname,
+	get_url,
+	now_datetime,
+	random_string,
+	validate_email_address,
+)
+from frappe.utils.data import sha256_hash
+from frappe.utils.password import check_password, get_password_reset_limit
 from frappe.website.utils import cleanup_page_name, is_signup_disabled
 
 from lms.lms.utils import get_country_code, get_lms_route
@@ -93,6 +103,45 @@ def on_login(login_manager):
 	default_app = frappe.db.get_single_value("System Settings", "default_app")
 	if default_app == "lms":
 		frappe.local.response["home_page"] = get_lms_route()
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+@rate_limit(limit=get_password_reset_limit, seconds=60 * 60)
+def resend_expired_password_link(key: str):
+	"""Send a fresh password-reset email when ``key`` is genuinely expired."""
+	_resend_expired_password_link((key or "").strip())
+	return {"message": _("A new password reset email has been sent.")}
+
+
+def _resend_expired_password_link(key: str):
+	if not key:
+		return
+
+	hashed_key = sha256_hash(key)
+	user = frappe.db.get_value("User", {"reset_password_key": hashed_key}, "name")
+	if not user:
+		return
+
+	user_doc = frappe.get_doc("User", user, for_update=True)
+	if user_doc.reset_password_key != hashed_key:
+		return
+
+	expiry_seconds = cint(
+		frappe.db.get_single_value("System Settings", "reset_password_link_expiry_duration")
+	)
+	generated_on = user_doc.last_reset_password_key_generated_on
+	if (
+		not expiry_seconds
+		or not generated_on
+		or now_datetime() <= generated_on + timedelta(seconds=expiry_seconds)
+	):
+		return
+
+	if user_doc.name == "Administrator" or not user_doc.enabled:
+		return
+
+	user_doc.validate_reset_password()
+	user_doc._reset_password(send_email=True)
 
 
 # ---------------------------------------------------------------------------

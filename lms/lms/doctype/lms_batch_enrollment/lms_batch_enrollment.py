@@ -1,19 +1,24 @@
 # Copyright (c) 2025, Frappe and contributors
 # For license information, please see license.txt
 
-import json
-
 import frappe
 from frappe import _
 from frappe.email.doctype.email_template.email_template import get_email_template
 from frappe.model.document import Document
 from frappe.utils import get_url
 
+from lms.lms.student_invitation import (
+	append_student_password_setup,
+	get_student_password_setup_url,
+	send_student_password_setup_email,
+	student_invitation_lock,
+)
+
 
 class LMSBatchEnrollment(Document):
 	def after_insert(self):
-		send_confirmation_email(self)
 		self.add_member_to_live_class()
+		_send_confirmation_email(self)
 
 	def validate(self):
 		self.validate_owner()
@@ -106,18 +111,37 @@ class LMSBatchEnrollment(Document):
 				).save()
 
 
-@frappe.whitelist()
-def send_confirmation_email(doc: Document):
-	if isinstance(doc, str):
-		doc = frappe._dict(json.loads(doc))
+@frappe.whitelist(methods=["POST"])
+def send_confirmation_email(name: str):
+	"""Re-send a batch enrollment email after checking document permission."""
+	doc = frappe.get_doc("LMS Batch Enrollment", name)
+	doc.check_permission("write")
+	_send_confirmation_email(doc)
 
-	if not doc.confirmation_email_sent:
-		outgoing_email_account = frappe.get_cached_value(
-			"Email Account", {"default_outgoing": 1, "enable_outgoing": 1}, "name"
+
+def _send_confirmation_email(doc: Document):
+	try:
+		with student_invitation_lock(doc.member):
+			# Re-read inside the cross-commit lock. Another request may have completed
+			# while this one waited for the student's first setup email.
+			if frappe.db.get_value(doc.doctype, doc.name, "confirmation_email_sent"):
+				return
+
+			outgoing_email_account = frappe.get_cached_value(
+				"Email Account", {"default_outgoing": 1, "enable_outgoing": 1}, "name"
+			)
+			if outgoing_email_account or frappe.conf.get("mail_login"):
+				password_setup_sent = send_mail(doc)
+				frappe.db.set_value(doc.doctype, doc.name, "confirmation_email_sent", 1)
+				if password_setup_sent:
+					frappe.db.commit()
+	except Exception:
+		# Keep the enrollment and both notification flags retryable when
+		# the assignment email could not be queued.
+		frappe.log_error(
+			_("Failed to send batch enrollment confirmation email for {0}").format(doc.name),
+			"Batch Enrollment Email",
 		)
-		if not doc.confirmation_email_sent and (outgoing_email_account or frappe.conf.get("mail_login")):
-			send_mail(doc)
-			frappe.db.set_value(doc.doctype, doc.name, "confirmation_email_sent", 1)
 
 
 def send_mail(doc):
@@ -152,6 +176,7 @@ def send_mail(doc):
 	custom_template = batch.confirmation_email_template or frappe.db.get_single_value(
 		"LMS Settings", "batch_confirmation_template"
 	)
+	password_setup_url = get_student_password_setup_url(doc.member)
 
 	args = {
 		"title": batch.title,
@@ -163,20 +188,27 @@ def send_mail(doc):
 		"start_date": batch.start_date,
 		"medium": batch.medium,
 		"name": batch.name,
+		"password_setup_url": password_setup_url,
 	}
 
 	if custom_template:
 		email_template = get_email_template(custom_template, args)
 		subject = email_template.get("subject")
 		content = email_template.get("message")
+		content = append_student_password_setup(content, password_setup_url)
 
-	frappe.sendmail(
-		recipients=doc.member,
-		subject=subject,
-		template=template if not custom_template else None,
-		content=content if custom_template else None,
-		args=args,
-		reference_doctype=doc.doctype,
-		reference_name=doc.name,
-		retry=3,
-	)
+	email_args = {
+		"recipients": doc.member,
+		"subject": subject,
+		"template": template if not custom_template else None,
+		"content": content if custom_template else None,
+		"args": args,
+		"reference_doctype": doc.doctype,
+		"reference_name": doc.name,
+		"retry": 3,
+	}
+	if password_setup_url:
+		return send_student_password_setup_email(doc.member, password_setup_url, **email_args)
+
+	frappe.sendmail(now=False, **email_args)
+	return False

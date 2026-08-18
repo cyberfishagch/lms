@@ -8,7 +8,7 @@ frappe.ui.form.on("LMS Batch Enrollment", {
 				frappe.call({
 					method: "lms.lms.doctype.lms_batch_enrollment.lms_batch_enrollment.send_confirmation_email",
 					args: {
-						doc: frm.doc,
+						name: frm.doc.name,
 					},
 					callback: function (r) {
 						frm.refresh();
