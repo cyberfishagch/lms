@@ -12,6 +12,9 @@ from lms.lms.doctype.lms_batch_enrollment.lms_batch_enrollment import (
 	send_confirmation_email,
 	send_mail,
 )
+from lms.lms.test_helpers import BaseTestUtils
+
+test_dependencies = ["Email Account"]
 
 
 class TestLMSBatchEnrollment(TestCase):
@@ -168,3 +171,68 @@ class TestLMSBatchEnrollment(TestCase):
 
 		set_value.assert_not_called()
 		log_error.assert_called_once()
+
+
+class IntegrationTestLMSBatchEnrollment(BaseTestUtils):
+	def test_deferred_student_receives_batch_assignment_email(self):
+		instructor = self._create_user(
+			f"batch-instructor-{frappe.generate_hash()}@example.com",
+			"Batch",
+			"Instructor",
+			["Moderator", "Course Creator", "Batch Evaluator"],
+		)
+		student = self._create_user(
+			f"batch-student-{frappe.generate_hash()}@example.com",
+			"Batch",
+			"Student",
+			["LMS Student"],
+		)
+		course = self._create_course(
+			f"Batch invitation course {frappe.generate_hash()}",
+			instructor.name,
+		)
+		evaluator = self._create_evaluator(instructor.name)
+		batch = self._create_batch(
+			course.name,
+			instructor=instructor.name,
+			title=f"Batch invitation {frappe.generate_hash()}",
+			evaluator=evaluator.name,
+		)
+		frappe.db.set_value(
+			"Email Account",
+			"_Test Email Account 1",
+			{"enable_outgoing": 1, "default_outgoing": 1},
+		)
+		frappe.clear_cache(doctype="Email Account")
+
+		frappe.set_user("Administrator")
+
+		def fail_on_email_error(*args, **kwargs):
+			raise AssertionError(frappe.get_traceback())
+
+		with (
+			patch(
+				"frappe.email.doctype.email_queue.email_queue.SendMailContext.fetch_smtp_server",
+				new=lambda context: setattr(
+					context,
+					"email_account_doc",
+					context.queue_doc.get_email_account(raise_error=True),
+				),
+			),
+			patch.object(frappe, "log_error", side_effect=fail_on_email_error),
+		):
+			enrollment = self._create_batch_enrollment(student.name, batch.name)
+
+		email_queue = frappe.get_last_doc(
+			"Email Queue",
+			filters={
+				"reference_doctype": enrollment.doctype,
+				"reference_name": enrollment.name,
+			},
+		)
+		self.assertEqual(email_queue.status, "Sent")
+		self.assertEqual(
+			frappe.db.get_value(enrollment.doctype, enrollment.name, "confirmation_email_sent"),
+			1,
+		)
+		self.assertEqual(frappe.db.get_value("User", student.name, "send_welcome_email"), 1)
