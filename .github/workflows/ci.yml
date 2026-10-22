@@ -98,6 +98,13 @@ jobs:
     name: Coverage Wrap Up
     needs: tests
     runs-on: ubuntu-latest
+    permissions:
+      # Codecov authenticates the upload with the runner's OIDC token. The
+      # repository has no CODECOV_TOKEN secret, and codecov rejects uploads
+      # that carry neither a token nor an OIDC token.
+      id-token: write
+      contents: read
+      actions: read
     steps:
       - name: Clone
         uses: actions/checkout@v3
@@ -109,6 +116,6 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           name: Server
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
           fail_ci_if_error: true
           verbose: true
