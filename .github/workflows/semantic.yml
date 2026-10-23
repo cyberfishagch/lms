@@ -10,10 +10,35 @@ jobs:
   semantic:
     name: Validate PR title
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
 
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
-      - uses: zeke/semantic-pull-requests@main
+      # The title is checked against the Conventional Commits spec, with the same
+      # list of types commitlint.config.js enforces for commit messages in the
+      # "Semantic Commits" job of the Linters workflow.
+      - name: Validate PR title
+        uses: amannn/action-semantic-pull-request@v6.1.1
+        env:
+          # The action reads the pull request through the REST API to get the
+          # current title, so it needs a token to authenticate with.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            build
+            chore
+            ci
+            docs
+            feat
+            fix
+            perf
+            refactor
+            revert
+            style
+            test
+            deprecate
