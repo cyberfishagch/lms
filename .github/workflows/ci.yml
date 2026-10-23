@@ -88,34 +88,4 @@ jobs:
       run: bench --site frappe.local build
     - name: run tests
       working-directory: /home/runner/frappe-bench
-      run: bench --site frappe.local run-tests --app lms --coverage
-    - name: Upload coverage data
-      uses: actions/upload-artifact@v4
-      with:
-        path: /home/runner/frappe-bench/sites/coverage.xml
-
-  coverage:
-    name: Coverage Wrap Up
-    needs: tests
-    runs-on: ubuntu-latest
-    permissions:
-      # Codecov authenticates the upload with the runner's OIDC token. The
-      # repository has no CODECOV_TOKEN secret, and codecov rejects uploads
-      # that carry neither a token nor an OIDC token.
-      id-token: write
-      contents: read
-      actions: read
-    steps:
-      - name: Clone
-        uses: actions/checkout@v3
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-
-      - name: Upload coverage data
-        uses: codecov/codecov-action@v5
-        with:
-          name: Server
-          use_oidc: true
-          fail_ci_if_error: true
-          verbose: true
+      run: bench --site frappe.local run-tests --app lms
