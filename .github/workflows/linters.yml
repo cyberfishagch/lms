@@ -18,7 +18,7 @@ jobs:
           fetch-depth: 200
       - uses: actions/setup-node@v6
         with:
-          node-version: 24.22.1
+          node-version: 24.22.2
           check-latest: true
 
       - name: Check commit titles
